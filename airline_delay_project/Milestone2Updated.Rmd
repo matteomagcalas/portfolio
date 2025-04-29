@@ -1,0 +1,352 @@
+
+---
+title: "Airline Delay and Cancellation Analysis and Visualization (2009-2018)"
+output: html_document
+runtime: shiny
+---
+
+
+```{r}
+library(shiny)
+library(ggplot2)
+library(dplyr)
+library(plotly)
+library(tidyverse)
+library(bslib)
+
+
+```
+
+Tab 1
+```{r}
+keys_df <- read.csv("github_portfolio/airline_delay_project/airlines.csv")
+review_df <- read.csv("stat436/airlinedelayapp/AirlineReviews.csv")
+
+delay_df_cleaned = read.csv("github_portfolio/airline_delay_project/sigDelaysOnly.csv") %>% left_join(keys_df, by = join_by(OP_CARRIER==IATA))%>%
+  mutate(Year = as.integer(Year))
+
+```
+
+Tab 2
+```{r}
+significantDelays <- read.csv("github_portfolio/airline_delay_project/sigDelaysOnly.csv") %>%
+  mutate(FL_DATE = as.Date(FL_DATE, format = "%Y-%m-%d"))
+
+significantDelays <- significantDelays %>%
+  mutate(Month = month(FL_DATE))
+
+sigDelayDefinition <- HTML("A significant delay is defined as any departure delay  30 minutes or later.")
+```
+
+```{r}
+#Question 1
+df_air_delay <- significantDelays %>% 
+  mutate(year = year(FL_DATE), month = month(FL_DATE, label = TRUE)) %>% 
+  group_by(year, month) %>% 
+  summarize(avg_delay = mean(DEP_DELAY, na.rm = TRUE))
+
+ggplot(df_air_delay, aes(x = month, y = avg_delay, color = factor(year), group = year)) +
+  geom_line(size = 1) +
+  labs(title = "Average Monthly Flight Delay Over Time",
+       x = "Month", y = "Average Delay (minutes)", color = "Year") +
+  theme_minimal()
+```
+
+
+```{r}
+delays2010 <- significantDelays %>%
+  filter(Year == 2010)
+
+delays2014 <- significantDelays %>%
+  filter(Year == 2014)
+
+delays2018 <- significantDelays %>%
+  filter(Year == 2018)
+
+independentVars <- setdiff(names(significantDelays), c("FL_DATE", "Year", "DEP_DELAY", "ORIGIN", "OP_CARRIER"))
+print(independentVars)
+
+formula <- as.formula(paste("DEP_DELAY ~", paste(independentVars, collapse = " + ")))
+```
+
+```{r}
+model2010 <- glm(formula, data = delays2010)
+summary(model2010)
+model2010_OriginOnly <- glm("DEP_DELAY ~ ORIGIN", data = delays2010)
+summary(model2010_OriginOnly)
+model2010_OPCARRIER <- glm("DEP_DELAY ~ OP_CARRIER", data = delays2010)
+summary(model2010_OPCARRIER)
+```
+
+
+```{r}
+model2014 <- glm(formula, data = delays2014)
+model2014_OriginOnly <- glm("DEP_DELAY ~ ORIGIN", data = delays2014)
+model2014_OPCARRIER <- glm("DEP_DELAY ~ OP_CARRIER", data = delays2014)
+```
+
+```{r}
+model2018 <- lm(formula, data = delays2018)
+model2018_OriginOnly <- glm("DEP_DELAY ~ ORIGIN", data = delays2018)
+model2018_OPCARRIER <- glm("DEP_DELAY ~ OP_CARRIER", data = delays2018)
+```
+
+```{r}
+
+extract_model_results <- function(model, year, model_type) {
+  if (inherits(model, "lm") || inherits(model, "glm")) {
+    coef_table <- summary(model)$coefficients
+    data.frame(
+      Year = year,
+      ModelType = model_type,
+      Variable = rownames(coef_table),
+      Coefficient = coef_table[, 1],
+      StdError = coef_table[, 2],
+      TValue = coef_table[, 3],
+      PValue = coef_table[, 4]
+    )
+  } else {
+    warning(paste("The provided object for year", year, "and model type", model_type, "is not a valid model."))
+    return(NULL)
+  }
+}
+
+baseModels <- list(model2010, model2014, model2018)
+originModels <- list(model2010_OriginOnly, model2014_OriginOnly, model2018_OriginOnly)
+opCarrierModels <- list(model2010_OPCARRIER, model2014_OPCARRIER, model2018_OPCARRIER)
+
+# Extract results from each set of models
+baseModelResults <- do.call(rbind, lapply(seq_along(baseModels), function(i) {
+  extract_model_results(baseModels[[i]], c(2010, 2014, 2018)[i], "base")
+})) %>%
+  filter(PValue != 0)
+
+originModelResults <- do.call(rbind, lapply(seq_along(originModels), function(i) {
+  extract_model_results(originModels[[i]], c(2010, 2014, 2018)[i], "originOnly")
+})) %>%
+  filter(PValue != 0)
+
+opCarrierModelResults <- do.call(rbind, lapply(seq_along(opCarrierModels), function(i) {
+  extract_model_results(opCarrierModels[[i]], c(2010, 2014, 2018)[i], "opCarrierOnly")
+})) %>%
+  filter(PValue != 0)
+
+# Combine all model results into one data frame
+allModelResults <- bind_rows(baseModelResults, originModelResults, opCarrierModelResults)
+
+
+```
+
+```{r}
+library(ggnewscale)
+
+top5Results <- allModelResults %>% 
+  group_by(Year, ModelType) %>% 
+  arrange(PValue) %>% 
+  mutate(Rank = row_number()) %>% 
+  ungroup() %>% filter(Rank <= 5) %>% 
+  mutate(AdjustedCount = 6 - Rank) %>%
+  rename()
+
+top5Results$Variable <- ifelse(
+  startsWith(top5Results$Variable, "ORIGIN"),
+  sub("ORIGIN", "", top5Results$Variable),
+  ifelse(
+    startsWith(top5Results$Variable, "OP_CARRIER"),
+    sub("OP_CARRIER", "", top5Results$Variable),
+    ifelse(
+      startsWith(top5Results$Variable, "ACTUAL_MINUS_CRS_ELAPSED"),
+      sub("ACTUAL_MINUS_CRS_ELAPSED", "ActMinusPredElapsed", top5Results$Variable),
+      top5Results$Variable
+    )
+  )
+)
+
+modelTypeLegend <- HTML("
+<ul>
+  <li><b>Base Model: </b> A comprehensive model that includes all available variables to predict departure delay This captures the collective influence of all predictors.</li>
+  <li><b>opCarrierOnly: </b> Measures how departure delay is impacted by different airlines, see list of airlines</li>
+  <li><b>originOnly: </b> Measures how the departure date is impacted by different airport origins</li>
+</ul>")
+```
+
+```{r}
+airlineNames <- read_csv("https://raw.githubusercontent.com/datasets/airport-codes/refs/heads/main/data/airport-codes.csv")
+delay_df_cleaned <- delay_df_cleaned %>%
+  left_join(airlineNames %>% select(iata_code, name), by = c("ORIGIN" = "iata_code"))
+```
+
+
+```{r}
+baseModelOnly <- top5Results %>% 
+  filter(ModelType == "base") %>%
+  group_by(Year) %>%
+  ggplot(aes(x = Coefficient, y = reorder(Variable, Coefficient), fill = Variable)) +
+  geom_col() +
+  labs(
+    title = "Impact of Top 5 Base Model Variables",
+    x = "Coefficient",
+    y = "Variable"
+  ) +
+  facet_wrap(~Year, scales = "free_y") +  
+  theme(
+    legend.position = "none",
+    axis.text.y = element_text(size = 10),
+    strip.text = element_text(size = 12, face = "bold"),
+    plot.title = element_text(size = 16, face = "bold")
+  )
+
+```
+
+
+
+```{r}
+ui <- fluidPage(
+  theme = bs_theme(bg = "#E8E9EB", fg = "black"),
+  tabsetPanel(
+    tabPanel(
+      "Overview",
+      titlePanel("Airline Delays and Ratings Dashboard"),
+      selectInput("year", "Select Year",
+                  choices = c("All", 
+                             unique(delay_df_cleaned$Year)), 
+                              selected = "2009"
+                  ),
+      wellPanel(fluidRow(
+        column(6, plotOutput("bargraph")),
+        column(6, plotOutput("boxPlot")),
+      )),
+      plotlyOutput("scatterplot")
+    ),
+    tabPanel(
+      "Rankings",
+      titlePanel("Important Factors in Airline Delays, measured over the years"),
+      fluidRow(
+          column(4, selectInput("ModelType", "Select a Model Type",
+                    choices = c("All",
+                                unique(top5Results$ModelType)),
+                    selected = "All"),
+        modelTypeLegend),
+          column(8, plotlyOutput("rankingsPlot"))
+      ),
+      sidebarPanel(
+        tableOutput("carrierTable")
+      ),
+      fluidRow(
+        column(4, tableOutput("airlineNameTable")),
+        column(8, plotOutput("baseModelOnly"))
+      )
+    )
+  )
+)
+
+# Define Server logic
+server <- function(input, output) {
+  
+  #filtered data used for all outputs
+  filtered_data <- reactive({
+    delay_df_cleaned %>%
+      filter((Year == input$year| input$year == "All"))
+  })
+  output$bargraph = renderPlot({
+    filtered_data() %>% group_by(Name) %>% 
+      summarize(count = n())%>% 
+      arrange(-count) %>%
+      ggplot(aes(x = count, y = reorder(Name, count))) + geom_col()+
+      theme(axis.text.x = element_text(angle = 45, size = 8)) +
+      labs(title = "Airline Delay Count Histogram", y = "Airline Name", x = "Number of Delays")
+  })
+  output$boxPlot = renderPlot({
+    filtered_data() %>% ggplot(aes(x = DEP_DELAY, y = reorder(Name, DEP_DELAY, median))) +
+  geom_boxplot(outliers = FALSE)+
+      theme(axis.text.x = element_text(angle = 45, size = 11))+
+      labs(title = "Airline Delay Time boxplot", y = "Airline Name", x = "Delayed Times (in minutes)")
+  })
+  
+  output$scatterplot = renderPlotly({
+    airline_temp = filtered_data()  %>%group_by(OP_CARRIER, Name) %>% count() %>% pull(Name)
+
+    review_df_filtered = review_df %>% 
+    filter(AirlineName == airline_temp)%>%
+    drop_na(OverallScore) %>% group_by(AirlineName) %>% summarize(mean = mean(OverallScore))
+
+    plot = filtered_data() %>% left_join(review_df_filtered, join_by(Name == AirlineName)) %>% 
+      drop_na(mean) %>% group_by(Name, mean) %>% summarize(median_dep_delay = median(DEP_DELAY)) %>%
+      ggplot() +
+      geom_point(aes(x = mean, y = median_dep_delay, group = Name)) +
+      geom_smooth(aes(x = mean, y = median_dep_delay), method =lm, se = FALSE) +
+      labs(title = "Airline Ratings vs Time Delayed", y = "Median Departure Delays", x = "Average Airline Ratings")
+    ggplotly(plot)
+  })
+  
+output$rankingsPlot <- renderPlotly({
+    modelType <- input$ModelType
+    
+    if (modelType == "All") {
+      filteredData <- top5Results 
+    } else {
+      filteredData <- top5Results[top5Results$ModelType == modelType, ]
+    }
+    
+    rankingsPlot <- ggplot(filteredData, aes(y = Rank, x = AdjustedCount, fill = Variable)) +
+      geom_bar(stat = "identity", position = position_dodge(width = 0.7)) +
+      facet_wrap(Year ~ ModelType, scales = "free_x") +
+      labs(
+        title = "Top 5 Variable Rankings by Model Type and Year",
+        x = "Rank",
+        y = "Count"
+      ) +
+      theme_minimal() +
+      theme(
+        axis.text.y = element_text(angle = 0, hjust = 1),
+        plot.title = element_text(size = 16, face = "bold"),
+        panel.spacing = unit(2, "lines"),  
+        legend.position = "none"  
+    )
+    
+    ggplotly(rankingsPlot, tooltip = c("Variable", "Rank", "AdjustedCount")) %>% 
+      layout(
+      width = 800,  
+      height = 860  
+      )
+  })
+
+carrierNameList <- reactive({
+  delay_df_cleaned %>%
+    select(OP_CARRIER, Name) %>%
+    distinct() %>%
+    filter(OP_CARRIER %in% unique(top5Results$Variable)) %>%
+    arrange(OP_CARRIER)
+})
+
+  # Render the carrier list as a table in the UI
+  output$carrierTable <- renderTable({
+    carrierNameList()
+  })
+
+airlineNameList <- reactive({
+  delay_df_cleaned %>%
+    select(ORIGIN, name) %>%
+    distinct() %>%
+    filter(ORIGIN %in% unique(top5Results$Variable)) %>%
+    arrange(ORIGIN)
+})
+
+output$airlineNameTable <- renderTable({
+  airlineNameList()
+})
+
+output$baseModelOnly <- renderPlot({
+  baseModelOnly + 
+    theme(plot.margin = margin(t = 100, r = 0, b = 0, l = 0))
+})
+  
+  
+}
+
+# Run the application 
+shinyApp(ui = ui, server = server)
+
+```
+
+
