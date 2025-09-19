@@ -1,0 +1,12 @@
+name: ff_2024_analysis
+title: ff_2024_analysis
+username: matteomagcalas
+account: matteomagcalas
+server: shinyapps.io
+hostUrl: https://api.shinyapps.io/v1
+appId: 15509934
+bundleId: 10928517
+url: https://matteomagcalas.shinyapps.io/ff_2024_analysis/
+version: 1
+asMultiple: FALSE
+asStatic: FALSE
