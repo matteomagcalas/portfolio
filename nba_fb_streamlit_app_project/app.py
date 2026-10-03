@@ -91,7 +91,7 @@ with st.sidebar:
     cats = st.multiselect("Categories (remove one to punt it)", model.CATS[fmt], default=model.CATS[fmt])
     st.divider()
     d = data()
-    st.caption(f"ESPN data updated {pd.Timestamp(d['updated']).tz_convert('US/Eastern'):%b %d, %I:%M %p} ET. "
+    st.caption(f"ESPN data updated {pd.Timestamp(d['updated']).tz_convert('America/New_York'):%b %d, %I:%M %p} ET. "
                "Refreshes itself every few hours.")
     if st.button("Refresh now"):
         espn.refresh(force=True)
