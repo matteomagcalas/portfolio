@@ -60,7 +60,7 @@ def board_style(df, z, cats):
     Category cells: the player's z-score vs the draftable pool, the same number that drives Value."""
     styles = pd.DataFrame("", index=df.index, columns=df.columns)
     if "ADPval" in df:
-        styles["ADPval"] = (df.ADPval / 30).map(shade)  # full color at 30+ spots
+        styles["Rank"] = styles["ADPval"] = (df.ADPval / 30).map(shade)  # full color at 30+ spots
     for c in cats:
         if c in df:
             styles[c] = (z.loc[df.index, f"z_{c}"] / 2.5).map(shade)  # full color at +/-2.5 sd
@@ -138,7 +138,7 @@ FMT.update({"FG%": st.column_config.NumberColumn(format="%.3f"), "FT%": st.colum
             "value": st.column_config.NumberColumn("Value", format="%.2f",
                                                    help="Season value over replacement: z-scores x projected games"),
             "Injury": st.column_config.TextColumn(width="small", help="O = out, DTD = day-to-day; date = expected return"),
-            "Rank": st.column_config.NumberColumn(help="Our overall rank by value"),
+            "Rank": st.column_config.NumberColumn(help="Green = we rank them ahead of ADP (a steal). Red = behind ADP."),
             "ADPval": st.column_config.NumberColumn("ADP Val", format="%+.1f",
                                                     help="ADP minus our rank. Green/+ = we rank them ahead of ADP "
                                                          "(a steal). Red/- = behind ADP."),
@@ -184,7 +184,7 @@ with tab_draft:
     st.caption(f"Tick **Mine** for your picks and **Taken** for everyone else's. "
                f"{len(mine)} mine, {len(taken)} taken by others. Category colors: green = helps you vs. the "
                f"draftable pool, red = hurts (FG%/FT% weighted by attempts, high TO is red).")
-    cols = ["Mine", "Taken", "adp", "Rank", "ADPval", "PosRank", "name", "Logo", "team", "pos", "age", "value",
+    cols = ["Mine", "Taken", "adp", "Rank", "ADPval", "PosRank", "name", "team", "pos", "age", "value",
             *STAT_COLS, "Injury"]
     # key changes with the data so the editor never replays stale edits onto different rows
     edited = st.data_editor(view[cols].head(400).style.apply(board_style, z=v, cats=cats, axis=None), hide_index=True, height=650, column_config=FMT,
