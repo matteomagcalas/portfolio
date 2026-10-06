@@ -26,7 +26,7 @@ def board(cats, pool_size, updated):
     v["Injury"] = v.id.map((status + " " + back.where(~inj.season_out.astype(bool), "season")).str.strip()).fillna("")
     v["note"] = v.id.map(inj.note).fillna("")
     v["Rank"] = range(1, len(v) + 1)
-    primary = v.primary.fillna(v.pos.str.split("/").str[0]).fillna("")
+    primary = v.primary.fillna(v.pos.str.split("/").str[0]).map({"PG": "G", "SG": "G", "SF": "F", "PF": "F", "C": "C"}).fillna("")
     v["PosRank"] = primary + (v.groupby(primary).cumcount() + 1).astype(str)
     return v.set_index("id")
 
@@ -122,7 +122,7 @@ FMT.update({"FG%": st.column_config.NumberColumn(format="%.3f"), "FT%": st.colum
                                                    help="Season value over replacement: z-scores x projected games"),
             "Injury": st.column_config.TextColumn(width="small", help="O = out, DTD = day-to-day; date = expected return"),
             "Rank": st.column_config.NumberColumn(help="Green = we rank them ahead of ADP (a steal). Red = behind ADP."),
-            "PosRank": st.column_config.TextColumn("Pos Rk", help="Rank among players at their primary position"),
+            "PosRank": st.column_config.TextColumn("Pos Rk", help="Rank among players at their primary position group: G, F or C"),
             "name": "Player", "team": "Team", "pos": "Pos"})
 
 st.title("🏀 NBA Fantasy Draft Board 2026-27")
