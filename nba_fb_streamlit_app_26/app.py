@@ -109,6 +109,7 @@ qp = st.query_params
 mine = {int(x) for x in qp.get("mine", "").split(",") if x}
 taken = {int(x) for x in qp.get("taken", "").split(",") if x}
 v["Mine"], v["Taken"] = v.index.isin(mine), v.index.isin(taken)
+NBA_TEAMS = sorted(v.team.dropna().unique())
 
 STAT_COLS = ["GP", "MPG", "PTS", "REB", "AST", "STL", "BLK", "3PM", "FG%", "FT%", "TO"]
 FMT = {c: st.column_config.NumberColumn(format="%.1f") for c in STAT_COLS}
@@ -128,10 +129,11 @@ st.title("🏀 NBA Fantasy Draft Board 2026-27")
 tab_draft, tab_team, tab_waiver = st.tabs(["Draft board", "My team", "Waivers / pickups"])
 
 with tab_draft:
-    c1, c2, c3 = st.columns([2, 3, 1])
+    c1, c2, c3, c4 = st.columns([2, 2, 2, 1])
     search = c1.text_input("Search player")
     positions = c2.multiselect("Position", POSITIONS)
-    hide = c3.toggle("Hide drafted", value=False)
+    nba_teams = c3.multiselect("Team", NBA_TEAMS)
+    hide = c4.toggle("Hide drafted", value=False)
     view = v
     if hide:
         view = view[~view.Mine & ~view.Taken]
@@ -139,6 +141,8 @@ with tab_draft:
         view = view[view.name.str.contains(search, case=False, na=False)]
     if positions:
         view = view[pos_match(view, positions)]
+    if nba_teams:
+        view = view[view.team.isin(nba_teams)]
     view = view.sort_values(["adp", "Rank"], na_position="last")  # market order; click a header to re-sort
     st.caption(f"Tick **Mine** for your picks and **Taken** for everyone else's. "
                f"{len(mine)} mine, {len(taken)} taken by others. Category colors: green = helps you vs. the "
@@ -223,8 +227,12 @@ with tab_waiver:
         for c in cats:
             fa[f"Δ{c}"] = (fa[f"z_{c}"] - worst[f"z_{c}"]).round(1)
         fa = fa[fa.Upgrade > 0]
-        pos_filter = st.multiselect("Position ", POSITIONS)
+        f1, f2 = st.columns(2)
+        pos_filter = f1.multiselect("Position ", POSITIONS)
+        team_filter = f2.multiselect("Team ", NBA_TEAMS)
         if pos_filter:
             fa = fa[pos_match(fa, pos_filter)]
+        if team_filter:
+            fa = fa[fa.team.isin(team_filter)]
         st.dataframe(fa[["name", "team", "pos", "Upgrade", "value", *[f"Δ{c}" for c in cats], "Injury"]].head(50),
                      hide_index=True, column_config=FMT)
