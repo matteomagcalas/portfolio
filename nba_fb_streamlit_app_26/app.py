@@ -21,6 +21,10 @@ def data():
 def board(cats, pool_size, updated):
     d = data()
     proj = model.project(d["stats"], espn.SEASON, injuries=d["injuries"], schedule=d["schedule"], players=d["players"])
+    # No ESPN projection = ESPN doesn't see them in a rotation (G League call-ups, two-ways, fringe vets).
+    # Without this, a 10-game call-up stint at 30 MPG projects as a full-season starter.
+    s = d["stats"]
+    proj = proj[proj.id.isin(s.id[(s.source == "espn") & (s.season == espn.SEASON) & (s.MPG > 0)])]
     v = model.value(proj, list(cats), pool_size)
     inj = d["injuries"].drop_duplicates("id").set_index("id")
     v = v.merge(d["players"], on="id", how="left")
