@@ -1,0 +1,15 @@
+# Streamlit Cloud reads this from the repo root, so it themes the NBA Fantasy Hub app in nba_fb_streamlit_app_26/.
+[theme]
+base = "dark"
+primaryColor = "#F58426"
+backgroundColor = "#0B1220"
+secondaryBackgroundColor = "#141D2F"
+textColor = "#E6EAF2"
+borderColor = "#24304A"
+dataframeHeaderBackgroundColor = "#101827"
+baseRadius = "0.6rem"
+font = "Inter:https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap"
+headingFont = "Oswald:https://fonts.googleapis.com/css2?family=Oswald:wght@500;700&display=swap"
+
+[theme.sidebar]
+backgroundColor = "#0F1829"
