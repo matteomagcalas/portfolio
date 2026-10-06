@@ -116,7 +116,7 @@ FMT = {c: st.column_config.NumberColumn(format="%.1f") for c in STAT_COLS}
 FMT.update({"FG%": st.column_config.NumberColumn(format="%.3f"), "FT%": st.column_config.NumberColumn(format="%.3f"),
             "GP": st.column_config.NumberColumn(format="%.0f", help="Projected games played: games left after known "
                                                 "injuries x expected availability from injury history"),
-            "adp": st.column_config.NumberColumn("ADP", format="%.0f"),
+            "adp": st.column_config.NumberColumn("ADP", format="%.1f"),
             "age": st.column_config.NumberColumn("Age", format="%.0f"),
             "value": st.column_config.NumberColumn("Value", format="%.2f",
                                                    help="Season value over replacement: z-scores x projected games"),
