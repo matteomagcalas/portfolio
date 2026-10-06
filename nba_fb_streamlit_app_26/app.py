@@ -29,6 +29,7 @@ def board(cats, pool_size, updated):
     v["Injury"] = v.id.map((status + " " + back.where(~inj.season_out.astype(bool), "season")).str.strip()).fillna("")
     v["note"] = v.id.map(inj.note).fillna("")
     v["Rank"] = range(1, len(v) + 1)
+    v["ADPval"] = v.adp - v.Rank  # + = we rank them ahead of the market (a steal)
     primary = v.primary.fillna(v.pos.str.split("/").str[0]).map({"PG": "G", "SG": "G", "SF": "F", "PF": "F", "C": "C"}).fillna("")
     v["PosRank"] = primary + (v.groupby(primary).cumcount() + 1).astype(str)
     v["Photo"] = v.id.map(lambda i: f"{ESPN_IMG}/i/headshots/nba/players/full/{i}.png&w=96&h=70")
@@ -58,8 +59,8 @@ def board_style(df, z, cats):
     """Rank: green when we rank a player ahead of ADP (a steal), red when behind.
     Category cells: the player's z-score vs the draftable pool, the same number that drives Value."""
     styles = pd.DataFrame("", index=df.index, columns=df.columns)
-    if "adp" in df:
-        styles["Rank"] = ((df.adp - df.Rank) / 30).map(shade)  # full color at 30+ spots
+    if "ADPval" in df:
+        styles["ADPval"] = (df.ADPval / 30).map(shade)  # full color at 30+ spots
     for c in cats:
         if c in df:
             styles[c] = (z.loc[df.index, f"z_{c}"] / 2.5).map(shade)  # full color at +/-2.5 sd
@@ -137,7 +138,10 @@ FMT.update({"FG%": st.column_config.NumberColumn(format="%.3f"), "FT%": st.colum
             "value": st.column_config.NumberColumn("Value", format="%.2f",
                                                    help="Season value over replacement: z-scores x projected games"),
             "Injury": st.column_config.TextColumn(width="small", help="O = out, DTD = day-to-day; date = expected return"),
-            "Rank": st.column_config.NumberColumn(help="Green = we rank them ahead of ADP (a steal). Red = behind ADP."),
+            "Rank": st.column_config.NumberColumn(help="Our overall rank by value"),
+            "ADPval": st.column_config.NumberColumn("ADP Val", format="%+.1f",
+                                                    help="ADP minus our rank. Green/+ = we rank them ahead of ADP "
+                                                         "(a steal). Red/- = behind ADP."),
             "PosRank": st.column_config.TextColumn("Pos Rk", help="Rank among players at their primary position group: G, F or C"),
             "name": "Player", "team": "Team", "pos": "Pos",
             "Photo": st.column_config.ImageColumn("", width=48),
@@ -146,13 +150,13 @@ FMT.update({"FG%": st.column_config.NumberColumn(format="%.3f"), "FT%": st.colum
 st.title("🏀 NBA Fantasy Hub 2026-27")
 ago = (pd.Timestamp.now(tz="UTC") - pd.Timestamp(d["updated"])).total_seconds() / 3600
 avail = v[~v.Mine & ~v.Taken]
-steals = avail[avail.adp.notna()].assign(gap=lambda x: x.adp - x.Rank)
+steals = avail[avail.ADPval.notna()]
 m1, m2, m3, m4 = st.columns(4)
 m1.metric("Best available", avail.iloc[0]["name"] if len(avail) else "-",
           f"{avail.iloc[0].value:.2f} value" if len(avail) else None, delta_color="off", border=True)
 if len(steals):
-    s = steals.loc[steals.gap.idxmax()]
-    m2.metric("Biggest steal vs ADP", s["name"], f"ranked {s.gap:.0f} spots ahead of ADP", border=True)
+    s = steals.loc[steals.ADPval.idxmax()]
+    m2.metric("Biggest steal vs ADP", s["name"], f"ranked {s.ADPval:.0f} spots ahead of ADP", border=True)
 else:
     m2.metric("Biggest steal vs ADP", "-", border=True)
 m3.metric("Your picks", len(mine), f"{len(taken)} taken by others", delta_color="off", border=True)
@@ -180,7 +184,7 @@ with tab_draft:
     st.caption(f"Tick **Mine** for your picks and **Taken** for everyone else's. "
                f"{len(mine)} mine, {len(taken)} taken by others. Category colors: green = helps you vs. the "
                f"draftable pool, red = hurts (FG%/FT% weighted by attempts, high TO is red).")
-    cols = ["Mine", "Taken", "adp", "Rank", "PosRank", "Photo", "name", "Logo", "team", "pos", "age", "value",
+    cols = ["Mine", "Taken", "adp", "Rank", "ADPval", "PosRank", "name", "Logo", "team", "pos", "age", "value",
             *STAT_COLS, "Injury"]
     # key changes with the data so the editor never replays stale edits onto different rows
     edited = st.data_editor(view[cols].head(400).style.apply(board_style, z=v, cats=cats, axis=None), hide_index=True, height=650, column_config=FMT,
