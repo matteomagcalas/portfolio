@@ -142,9 +142,6 @@ FMT.update({"FG%": st.column_config.NumberColumn(format="%.3f"), "FT%": st.colum
             "name": "Player", "team": "Team", "pos": "Pos",
             "Photo": st.column_config.ImageColumn("", width=48),
             "Logo": st.column_config.ImageColumn("", width=28)})
-FMT["value"] = st.column_config.ProgressColumn("Value", format="%.2f", min_value=float(v.value.min()),
-                                               max_value=float(v.value.max()),
-                                               help="Season value over replacement: z-scores x projected games")
 
 st.title("🏀 NBA Fantasy Hub 2026-27")
 ago = (pd.Timestamp.now(tz="UTC") - pd.Timestamp(d["updated"])).total_seconds() / 3600
@@ -170,7 +167,6 @@ with tab_draft:
     positions = c2.multiselect("Position", POSITIONS)
     nba_teams = c3.multiselect("Team", NBA_TEAMS)
     hide = c4.toggle("Hide drafted", value=False)
-    all_stats = c4.toggle("Show all stats", value=False)
     view = v
     if hide:
         view = view[~view.Mine & ~view.Taken]
@@ -184,12 +180,12 @@ with tab_draft:
     st.caption(f"Tick **Mine** for your picks and **Taken** for everyone else's. "
                f"{len(mine)} mine, {len(taken)} taken by others. Category colors: green = helps you vs. the "
                f"draftable pool, red = hurts (FG%/FT% weighted by attempts, high TO is red).")
-    cols = ["Mine", "Taken", "adp", "Rank", "PosRank", "Photo", "name", "Logo", "team", "pos", "value", "Injury",
-            *(["age", *STAT_COLS] if all_stats else cats)]
+    cols = ["Mine", "Taken", "adp", "Rank", "PosRank", "Photo", "name", "Logo", "team", "pos", "age", "value",
+            *STAT_COLS, "Injury"]
     # key changes with the data so the editor never replays stale edits onto different rows
     edited = st.data_editor(view[cols].head(400).style.apply(board_style, z=v, cats=cats, axis=None), hide_index=True, height=650, column_config=FMT,
                             disabled=[c for c in cols if c not in ("Mine", "Taken")],
-                            key=f"ed-{hash((tuple(view.index[:400]), frozenset(mine), frozenset(taken), all_stats))}")
+                            key=f"ed-{hash((tuple(view.index[:400]), frozenset(mine), frozenset(taken)))}")
     shown = set(view.index[:400])
     new_mine = (mine - shown) | set(view.index[:400][edited.Mine.values])
     new_taken = (taken - shown) | set(view.index[:400][edited.Taken.values])
@@ -209,7 +205,7 @@ with tab_team:
         strength = team[[f"z_{c}" for c in cats]].sum() - avg_team * len(team) / roster
         for col, c in zip(st.columns(len(cats)), cats):
             col.metric(c, f"{strength[f'z_{c}']:+.1f}")
-        st.dataframe(team[["Rank", "PosRank", "Photo", "name", "Logo", "team", "pos", "value", "Injury", *STAT_COLS]]
+        st.dataframe(team[["Rank", "PosRank", "Photo", "name", "Logo", "team", "pos", "value", *STAT_COLS, "Injury"]]
                      .style.apply(board_style, z=v, cats=cats, axis=None), hide_index=True, column_config=FMT)
 
         # Fantasy week = Monday-Sunday; before opening night, use the opening week.
@@ -272,6 +268,6 @@ with tab_waiver:
             fa = fa[pos_match(fa, pos_filter)]
         if team_filter:
             fa = fa[fa.team.isin(team_filter)]
-        st.dataframe(fa[["Photo", "name", "Logo", "team", "pos", "Upgrade", "value", "Injury", *[f"Δ{c}" for c in cats]]]
+        st.dataframe(fa[["Photo", "name", "Logo", "team", "pos", "Upgrade", "value", *[f"Δ{c}" for c in cats], "Injury"]]
                      .head(50).style.apply(lambda col: col.map(injury_badge), subset=["Injury"]),
                      hide_index=True, column_config=FMT)
