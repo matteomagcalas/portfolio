@@ -12,7 +12,7 @@ Projection = per-minute rates x projected minutes x projected games.
 context: adjust() learns per-stat multipliers on those rates from trend (star step), trend x age,
          role change and team change, trained on how past projections missed.
 Value = sum of category z-scores over the draftable pool, minus replacement level,
-scaled by projected games.
+scaled by projected games, then softplus'd so it never goes below 0 (replacement level = about 0.7).
 """
 import numpy as np
 import pandas as pd
@@ -317,5 +317,7 @@ def value(proj, cats, pool_size, weights=None, iterations=3):
         score = (per_game - replacement) * df.GP / SEASON_GAMES
     df[[f"z_{c}" for c in cats]] = z.values
     df["value_pg"] = per_game.round(2)
-    df["value"] = score.round(2)
-    return df.sort_values("value", ascending=False)
+    # softplus: about equal to value over replacement for good players, slides toward 0 (never below) for
+    # players under replacement, since drafting a 15th man doesn't hurt you. Monotonic, so ranks don't change.
+    df["value"] = np.logaddexp(0, score).round(2)
+    return df.assign(_s=score).sort_values("_s", ascending=False).drop(columns="_s")  # exact order, not rounded ties

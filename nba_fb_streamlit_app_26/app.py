@@ -142,7 +142,8 @@ FMT.update({"FG%": st.column_config.NumberColumn(format="%.3f"), "FT%": st.colum
             "adp": st.column_config.NumberColumn("ADP", format="%.1f"),
             "age": st.column_config.NumberColumn("Age", format="%.0f"),
             "value": st.column_config.NumberColumn("Value", format="%.2f",
-                                                   help="Season value over replacement: z-scores x projected games"),
+                                                   help="Season value: z-scores x projected games. Never negative: about 0.7 = "
+                                                        "replacement level, near 0 = won't play"),
             "Injury": st.column_config.TextColumn(width="small", help="O = out, DTD = day-to-day; date = expected return"),
             "Rank": st.column_config.NumberColumn(help="Green = we rank them ahead of ADP (a steal). Red = behind ADP."),
             "ADPval": st.column_config.NumberColumn("ADP Val", format="%+.1f",
