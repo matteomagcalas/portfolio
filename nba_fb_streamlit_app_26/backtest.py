@@ -37,13 +37,15 @@ def main():
     age = d["players"].set_index("id").age - (espn.SEASON - TARGET)  # age during the backtest season
     actual = pct(stats[(stats.source == "actual") & (stats.season == TARGET)])
     team = actual.set_index("id").team_id  # the team each player actually played for that season
+    # no saved preseason depth charts: "started half his games" stands in for them (optimistic, uses in-season info)
+    start = (actual.set_index("id").GS >= 0.5).astype(float)
     projs = {
         "repeat last season": pct(stats[(stats.source == "actual") & (stats.season == TARGET - 1)]),
         "ESPN 2025-26 proj": pct(stats[(stats.source == "espn") & (stats.season == TARGET)]),
-        "ours (default)": model.project(stats, TARGET, current_team=team, age=age, players=d["players"]),
+        "ours (default)": model.project(stats, TARGET, current_team=team, age=age, players=d["players"], starter=start),
         "ours, ESPN-blend minutes": model.project(stats, TARGET, current_team=team, age=age, roster_min=False),
         "ours, no ESPN input": model.project(stats, TARGET, espn_rate_blend=0, current_team=team, age=age,
-                                             players=d["players"]),
+                                             players=d["players"], starter=start),
     }
     ids = set.intersection(*(set(p.id) for p in projs.values()))  # same players for every method
     print(pd.DataFrame({k: score(p, actual, ids) for k, p in projs.items()}).T.round(3).to_string())

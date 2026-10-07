@@ -4,7 +4,8 @@ Projection = per-minute rates x projected minutes x projected games.
   rates:   last 3 seasons, near-flat season weights, shrunk toward league rate by
            minutes played, adjusted for age, blended with ESPN's projected rates
   minutes: our roster model (roster_minutes): a regression trained on past seasons that predicts MPG
-           from a player's own minutes history plus his current roster's competition. No ESPN input.
+           from a player's own minutes history, last season's starting role, this season's starting role
+           (ESPN depth chart) and his current roster's competition. No ESPN projections.
            ESPN's MPG is only the fallback for players with no NBA minutes last season (rookies etc.).
   games:   expected share of games (fit from median availability of prior seasons)
            x games left after the current injury's return date
@@ -42,13 +43,16 @@ AGE_CURVE = pd.DataFrame({
 
 def project(stats, target, weights=(1.0, 0.9, 0.8), shrink_min=600, espn_rate_blend=0.5,
             espn_min_blend=0.9, injuries=None, schedule=None, players=None,
-            today=None, current_team=None, moved_rate_blend=0.5, age=None, roster_min=True):
+            today=None, current_team=None, moved_rate_blend=0.5, age=None, roster_min=True, starter=None):
     """Per-game projections for season `target`, using only actual stats from earlier seasons.
     moved_rate_blend: ESPN rate weight for players who changed teams. Backtest (2025-26, 102
     movers) found leaning harder on ESPN slightly hurt, so it matches espn_rate_blend.
     age: Series id -> age during `target`; defaults to players.age.
+    starter: id -> 1/0 projected starter (depth chart). Without it, minutes fall back to the ESPN blend.
     roster_min: replace the ESPN-blended MPG with roster_minutes() wherever it has a prediction. Backtest
-    (2024-25 and 2025-26): PTS error 2.33->2.15 and 2.51->2.43, team-changer PTS bias +1.7 -> +0.3/+0.5."""
+    (2024-25 / 2025-26, starter = started half his games, a stand-in for the preseason depth chart):
+    PTS error 2.33/2.51 -> 2.10/2.17, MPG error 3.80/4.07 -> 3.25/3.06, value rank 0.72/0.73 -> 0.77/0.75;
+    starters who lost their spot: PTS bias +1.9/+3.1 -> -0.9/+0.6."""
     hist = stats[(stats.source == "actual") & (stats.season < target) & (stats.season >= target - len(weights))
                  & (stats.GP > 0)].copy()
     hist["w"] = hist.season.map({target - 1 - i: w for i, w in enumerate(weights)})
@@ -91,10 +95,11 @@ def project(stats, target, weights=(1.0, 0.9, 0.8), shrink_min=600, espn_rate_bl
     out["MPG"] = np.where(mpg_espn.notna() & out.MPG.notna(),
                           espn_min_blend * mpg_espn + (1 - espn_min_blend) * out.MPG,
                           out.MPG.fillna(mpg_espn))
-    if roster_min and current_team is not None:
+    if roster_min and current_team is not None and starter is not None:  # needs the depth chart
         pl = players.set_index("id") if players is not None else pd.DataFrame(columns=["primary", "pos"])
         group = pl.primary.fillna(pl.pos.str.split("/").str[0]).map(GROUPS)
-        mins = roster_minutes(stats, target, current_team, group, age if age is not None else pd.Series(dtype=float))
+        mins = roster_minutes(stats, target, current_team, group, age if age is not None else pd.Series(dtype=float),
+                              starter)
         out["MPG"] = mins.reindex(out.index).fillna(out.MPG)
     out["health"] = out.health.fillna(ROOKIE_AVAIL) * AVAIL_SCALE
 
@@ -110,8 +115,9 @@ def project(stats, target, weights=(1.0, 0.9, 0.8), shrink_min=600, espn_rate_bl
 GROUPS = {"PG": "G", "SG": "G", "SF": "F", "PF": "F", "C": "C"}
 
 
-def _minute_features(actual, T, roster, group, age):
-    """One row per rostered player with NBA minutes in season T-1. Uses only seasons before T."""
+def _minute_features(actual, T, roster, group, age, starter):
+    """One row per rostered player with NBA minutes in season T-1. Uses seasons before T, plus `starter`
+    (id -> 0..1): his starting role in T. Training: share of games started in T. Live: depth chart."""
     prev1 = actual[actual.season == T - 1].set_index("id")
     prev2 = actual[actual.season == T - 2].set_index("id")
     df = pd.DataFrame({"team": roster})
@@ -125,6 +131,10 @@ def _minute_features(actual, T, roster, group, age):
     df["group"] = group.reindex(df.index).fillna("F")
     df["age"] = age.reindex(df.index).fillna(25)
     df["base"] = 0.7 * df.mpg1 + 0.3 * df.mpg2.where(df.mpg2 > 0, df.mpg1)
+    df["gs1"] = prev1.GS.reindex(df.index).fillna(0)  # share of games started (ESPN per-game average)
+    df["start"] = starter.reindex(df.index).fillna(0)
+    df["benched"] = df.gs1 * (1 - df.start)  # started last season, not now
+    df["promoted"] = (1 - df.gs1) * df.start
     # competition: last season's minutes held by better-per-minute teammates, at his position group and overall
     pairs = df.reset_index(names="id").merge(df.reset_index(names="mate"), on="team", suffixes=("", "_m"))
     pairs = pairs[(pairs.id != pairs.mate) & (pairs.quality_m > pairs.quality)]
@@ -137,14 +147,16 @@ def _minute_features(actual, T, roster, group, age):
 
 def _design(df):
     x = df[["mpg1", "mpg2", "gp1", "quality", "moved", "age", "base", "ahead_group", "ahead_all", "team_load",
-            "qrank"]].astype(float)
-    return np.c_[np.ones(len(x)), x.values, (x.age - 27) ** 2, x.base * x.ahead_group / 60]
+            "qrank", "gs1", "start", "benched", "promoted"]].astype(float)
+    return np.c_[np.ones(len(x)), x.values, (x.age - 27) ** 2, x.base * x.ahead_group / 60,
+                 x.base * x.benched, x.base * x.start]
 
 
-def roster_minutes(stats, target, roster, group, age):
+def roster_minutes(stats, target, roster, group, age, starter):
     """Projected MPG for season `target` from minutes history + roster competition, no ESPN input.
     Linear regression fit on every earlier season that has a prior season (players with 10+ GP).
-    roster: Series id -> team_id for `target`; group: id -> G/F/C; age: id -> age during `target`."""
+    roster: Series id -> team_id for `target`; group: id -> G/F/C; age: id -> age during `target`;
+    starter: id -> 1 if projected to start in `target` (depth chart), else 0."""
     actual = stats[(stats.source == "actual") & (stats.season < target)]
     seasons = set(actual.season)
     train = []
@@ -152,11 +164,11 @@ def roster_minutes(stats, target, roster, group, age):
         if T - 1 not in seasons:
             continue
         cur = actual[(actual.season == T) & (actual.GP >= 10) & (actual.team_id > 0)].set_index("id")
-        f = _minute_features(actual, T, cur.team_id, group, age - (target - T))
+        f = _minute_features(actual, T, cur.team_id, group, age - (target - T), (cur.GS >= 0.5).astype(float))
         train.append(f.assign(y=cur.MPG))
     train = pd.concat(train)
     beta = np.linalg.lstsq(_design(train), train.y.values, rcond=None)[0]
-    f = _minute_features(actual, target, roster[roster > 0], group, age)
+    f = _minute_features(actual, target, roster[roster > 0], group, age, starter)
     return pd.Series(np.clip(_design(f) @ beta, 0, 40), index=f.index)
 
 

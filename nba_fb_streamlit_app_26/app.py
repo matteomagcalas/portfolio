@@ -20,7 +20,9 @@ def data():
 @st.cache_data(show_spinner=False)
 def board(cats, pool_size, updated):
     d = data()
-    proj = model.project(d["stats"], espn.SEASON, injuries=d["injuries"], schedule=d["schedule"], players=d["players"])
+    starter = d["depth"][d["depth"].slot == 0].drop_duplicates("id").set_index("id").slot.eq(0).astype(float)
+    proj = model.project(d["stats"], espn.SEASON, injuries=d["injuries"], schedule=d["schedule"], players=d["players"],
+                         starter=starter)
     # No ESPN projection = ESPN doesn't see them in a rotation (G League call-ups, two-ways, fringe vets).
     # Without this, a 10-game call-up stint at 30 MPG projects as a full-season starter.
     s = d["stats"]

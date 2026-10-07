@@ -17,7 +17,7 @@ FANTASY = "https://lm-api-reads.fantasy.espn.com/apis/v3/games/fba/seasons/{}/se
 SITE = "https://site.api.espn.com/apis/site/v2/sports/basketball/nba"
 FILTER = '{"players":{"limit":2000,"sortPercOwned":{"sortPriority":1,"sortAsc":false}}}'
 STAT = {"0": "PTS", "1": "BLK", "2": "STL", "3": "AST", "6": "REB", "11": "TO", "13": "FGM", "14": "FGA",
-        "15": "FTM", "16": "FTA", "17": "3PM", "18": "3PA", "40": "MPG", "42": "GP"}
+        "15": "FTM", "16": "FTA", "17": "3PM", "18": "3PA", "40": "MPG", "41": "GS", "42": "GP"}
 SLOT = {0: "PG", 1: "SG", 2: "SF", 3: "PF", 4: "C"}
 SEASON_OUT = re.compile(rf"(miss|out for) the (remainder of the |rest of the |entire )?({SEASON - 1}-{SEASON % 100} )?season", re.I)
 
@@ -60,7 +60,7 @@ def refresh(force=False):
         return
 
     history = DATA / "history.csv"  # finished seasons never change, pull once
-    if not history.exists() or "team_id" not in pd.read_csv(history, nrows=0).columns:
+    if not history.exists() or "GS" not in pd.read_csv(history, nrows=0).columns:
         rows = [r for s in range(FIRST_SEASON, SEASON) for r in _stat_rows(_players(s), s)]
         pd.DataFrame(rows).drop_duplicates(["id", "season", "source"]).to_csv(history, index=False)
 
@@ -70,13 +70,17 @@ def refresh(force=False):
     teams = {int(t["team"]["id"]): t["team"]["abbreviation"]
              for t in _get(f"{SITE}/teams")["sports"][0]["leagues"][0]["teams"]}
 
-    ages, games = {}, []
+    ages, games, depth = {}, [], []
     for tid in teams:
+        # depth chart: order at each position; slot 0 = projected starter
+        for pos, v in _get(f"{SITE}/teams/{tid}/depthcharts")["depthchart"][0]["positions"].items():
+            depth += [{"id": int(a["id"]), "team_id": tid, "pos": pos, "slot": i} for i, a in enumerate(v["athletes"])]
         for a in _get(f"{SITE}/teams/{tid}/roster")["athletes"]:
             ages[int(a["id"])] = a.get("age")
         for g in _get(f"{SITE}/teams/{tid}/schedule", params={"season": SEASON, "seasontype": 2}).get("events", []):
             games.append({"team_id": tid, "date": g["date"][:10]})
     pd.DataFrame(games).to_csv(DATA / "schedule.csv", index=False)
+    pd.DataFrame(depth, columns=["id", "team_id", "pos", "slot"]).to_csv(DATA / "depth.csv", index=False)
 
     pd.DataFrame([{
         "id": e["player"]["id"],
@@ -112,6 +116,7 @@ def load():
         "players": pd.read_csv(DATA / "players.csv"),
         "injuries": pd.read_csv(DATA / "injuries.csv"),
         "schedule": pd.read_csv(DATA / "schedule.csv"),
+        "depth": pd.read_csv(DATA / "depth.csv"),
         "updated": (DATA / "updated.txt").read_text(),
     }
 
