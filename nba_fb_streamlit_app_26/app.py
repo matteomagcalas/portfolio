@@ -206,11 +206,15 @@ with tab_draft:
     edited = st.data_editor(view[cols].head(400).style.apply(board_style, z=v, cats=cats, axis=None), hide_index=True, height=650, column_config=FMT,
                             disabled=[c for c in cols if c not in ("Mine", "Taken")],
                             key=f"ed-{hash((tuple(view.index[:400]), frozenset(mine), frozenset(taken)))}")
-    if len(nba_teams) == 1 and len(view):
-        tot = {c: view[c].sum() for c in ["value", "MPG", "PTS", "REB", "AST", "STL", "BLK", "3PM", "TO"]}
-        tot["FG%"], tot["FT%"] = view.FGM.sum() / view.FGA.sum(), view.FTM.sum() / view.FTA.sum()  # attempt-weighted
-        tot["name"] = f"{nba_teams[0]} totals ({len(view)} players)"
-        st.dataframe(pd.DataFrame([tot])[["name", "value", *[c for c in STAT_COLS if c != "GP"]]], hide_index=True,
+    if nba_teams and len(view):
+        rows = []
+        for t in nba_teams:  # one totals row per selected team, in the order picked
+            g = view[view.team == t]
+            if len(g):
+                tot = {c: g[c].sum() for c in ["value", "MPG", "PTS", "REB", "AST", "STL", "BLK", "3PM", "TO"]}
+                tot["FG%"], tot["FT%"] = g.FGM.sum() / g.FGA.sum(), g.FTM.sum() / g.FTA.sum()  # attempt-weighted
+                rows.append({"name": f"{t} totals ({len(g)} players)", **tot})
+        st.dataframe(pd.DataFrame(rows)[["name", "value", *[c for c in STAT_COLS if c != "GP"]]], hide_index=True,
                      column_config=FMT)
         st.caption("Sum of per-game projections. Players miss games, so these run above what the team scores on a "
                    "given night.")
