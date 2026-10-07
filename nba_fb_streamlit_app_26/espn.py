@@ -56,7 +56,7 @@ def _players(season):
 def refresh(force=False):
     DATA.mkdir(exist_ok=True)
     stamp = DATA / "updated.txt"
-    if not force and stamp.exists() and time.time() - stamp.stat().st_mtime < MAX_AGE_HOURS * 3600:
+    if not force and stamp.exists() and (DATA / "depth.csv").exists() and time.time() - stamp.stat().st_mtime < MAX_AGE_HOURS * 3600:
         return
 
     history = DATA / "history.csv"  # finished seasons never change, pull once
