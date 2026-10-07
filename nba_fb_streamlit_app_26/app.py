@@ -9,6 +9,11 @@ import espn
 import model
 
 st.set_page_config(page_title="NBA Fantasy Hub", page_icon="🏀", layout="wide")
+# Streamlit's default ~6rem top padding wastes board space; keep just enough to clear the toolbar
+st.markdown("""<style>
+[data-testid="stMainBlockContainer"], .block-container { padding-top: 1.5rem; }
+[data-testid="stSidebarUserContent"] { padding-top: 1rem; }
+</style>""", unsafe_allow_html=True)
 
 
 ESPN_IMG = "https://a.espncdn.com/combiner/i?img="  # resizes ESPN headshots/logos server side
