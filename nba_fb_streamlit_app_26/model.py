@@ -1,8 +1,8 @@
 """Projections and fantasy valuation.
 
 Projection = per-minute rates x projected minutes x projected games.
-  rates:   last 3 seasons, near-flat season weights, shrunk toward league rate by
-           minutes played, adjusted for age, blended with ESPN's projected rates
+  rates:   last 3 seasons weighted toward the most recent (1 / 0.6 / 0.3), shrunk toward league rate
+           by minutes played, adjusted for age, blended with ESPN's projected rates
   minutes: our roster model (roster_minutes): a regression trained on past seasons that predicts MPG
            from a player's own minutes history, last season's starting role, this season's starting role
            (ESPN depth chart) and his current roster's competition. No ESPN projections.
@@ -41,10 +41,12 @@ AGE_CURVE = pd.DataFrame({
     "FTA": [1.024, 1.025, 1.005, 0.938, 0.879, 0.965]})
 
 
-def project(stats, target, weights=(1.0, 0.9, 0.8), shrink_min=600, espn_rate_blend=0.5,
+def project(stats, target, weights=(1.0, 0.6, 0.3), shrink_min=300, espn_rate_blend=0.5,
             espn_min_blend=0.9, injuries=None, schedule=None, players=None,
             today=None, current_team=None, moved_rate_blend=0.5, age=None, roster_min=True, starter=None):
     """Per-game projections for season `target`, using only actual stats from earlier seasons.
+    weights/shrink_min: backtest 2024-25 and 2025-26, (1, .6, .3) with 300 had the lowest per-minute error of
+    the grid in both seasons and less pull toward league average for stars than near-flat (1, .9, .8) / 600.
     moved_rate_blend: ESPN rate weight for players who changed teams. Backtest (2025-26, 102
     movers) found leaning harder on ESPN slightly hurt, so it matches espn_rate_blend.
     age: Series id -> age during `target`; defaults to players.age.

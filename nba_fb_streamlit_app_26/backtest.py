@@ -61,7 +61,7 @@ def main():
 
     print("\nTuning (value_rank / mean stat corr):")
     grid = []
-    for w, rb, mb in itertools.product([(1, .9, .8), (1, .7, .5), (1, 1, 1), (1, .8)],
+    for w, rb, mb in itertools.product([(1, .6, .3), (1, .9, .8), (1, .5, .25), (1, .3, .1)],
                                        [0.3, 0.5, 0.7], [0.5, 0.7, 0.9]):
         s = score(model.project(stats, TARGET, weights=w, espn_rate_blend=rb, espn_min_blend=mb, current_team=team, age=age), actual, ids)
         grid.append({"weights": w, "rate_blend": rb, "min_blend": mb, "value_rank": s["value_rank"],
