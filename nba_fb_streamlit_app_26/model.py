@@ -9,6 +9,8 @@ Projection = per-minute rates x projected minutes x projected games.
            ESPN's MPG is only the fallback for players with no NBA minutes last season (rookies etc.).
   games:   expected share of games (fit from median availability of prior seasons)
            x games left after the current injury's return date
+context: adjust() learns per-stat multipliers on those rates from trend (star step), trend x age,
+         role change and team change, trained on how past projections missed.
 Value = sum of category z-scores over the draftable pool, minus replacement level,
 scaled by projected games.
 """
@@ -172,6 +174,67 @@ def roster_minutes(stats, target, roster, group, age, starter):
     beta = np.linalg.lstsq(_design(train), train.y.values, rcond=None)[0]
     f = _minute_features(actual, target, roster[roster > 0], group, age, starter)
     return pd.Series(np.clip(_design(f) @ beta, 0, 40), index=f.index)
+
+
+ADJ_STATS = ["PTS", "REB", "AST", "STL", "BLK", "3PM", "TO", "FGM", "FGA", "FTM", "FTA"]
+
+
+def _adj_features(actual, T, proj, team, starter, age):
+    """Context the base projection can't see, per player, from seasons before T:
+    trend (star step / decline), trend x youth, trend x age 30+, trend from an injury-shortened season
+    (trusted less), role change. A flat "short last season" penalty overshot in both backtest seasons."""
+    p = proj.set_index("id")
+    prev1, prev2 = (actual[actual.season == T - k].set_index("id").reindex(p.index) for k in (1, 2))
+    ag = age.reindex(p.index).fillna(26)
+    young, old = ((25 - ag).clip(lower=0) / 5), ((ag - 30).clip(lower=0) / 5)
+    f = pd.DataFrame(index=p.index)
+    f["short1"] = 1 - (prev1.GP / SEASON_GAMES).clip(upper=1).fillna(1)  # games missed last season
+    f["role"] = starter.reindex(p.index).fillna(0) - prev1.GS.fillna(0)  # + = promoted to starter
+    f["moved"] = ((team.reindex(p.index) != prev1.team_id) & prev1.team_id.notna()).astype(float)
+    f["min_change"] = ((p.MPG - prev1.MPG) / 10).fillna(0)
+    out = {}
+    for c in ADJ_STATS:
+        r1, r2 = prev1[c] / prev1.MPG, prev2[c] / prev2.MPG
+        both = (prev1.MPG >= 10) & (prev2.MPG >= 10)
+        trend = np.log((r1 + 0.02) / (r2 + 0.02)).where(both, 0).clip(-0.7, 0.7).fillna(0)
+        x = f.assign(trend=trend, trend_young=trend * young, trend_old=trend * old, trend_short=trend * f.short1)
+        out[c] = x[["trend", "trend_young", "trend_old", "trend_short", "role", "moved", "min_change"]]
+    return out
+
+
+def adjust(stats, target, proj, team, starter, players, age=None, ridge=20.0, first_season=2024):
+    """Learned per-stat multipliers on the per-minute rates in `proj`, from context features (_adj_features).
+    Trained on earlier seasons: their base projection vs what each player actually did (log ratio of
+    per-minute rates, weighted by minutes played). Ridge-regularized; multiplier capped at +/-25%."""
+    if age is None:
+        age = players.set_index("id").age
+    actual = stats[(stats.source == "actual") & (stats.season < target)]
+    X, Y, W = {c: [] for c in ADJ_STATS}, {c: [] for c in ADJ_STATS}, []
+    for T in range(first_season, target):
+        a = actual[actual.season == T].set_index("id")
+        start_T = (a.GS >= 0.5).astype(float)
+        base = project(stats[stats.season <= T], T, current_team=a.team_id, starter=start_T, players=players,
+                       age=age - (target - T))
+        base = base.set_index("id").reindex(a.index[(a.GP >= 20) & (a.MPG >= 12)]).dropna(subset=["PTS"])
+        feats = _adj_features(actual, T, base.reset_index(names="id"), a.team_id, start_T, age - (target - T))
+        W.append(a.GP[base.index] * a.MPG[base.index])
+        for c in ADJ_STATS:
+            X[c].append(feats[c].loc[base.index])
+            Y[c].append(np.log((a[c][base.index] / a.MPG[base.index] + 0.02) / (base[c] / base.MPG + 0.02)))
+    if not W:
+        return proj
+    w = pd.concat(W)
+    feats = _adj_features(actual, target, proj, team, starter, age)
+    out = proj.set_index("id").copy()
+    for c in ADJ_STATS:
+        x, y = pd.concat(X[c]), pd.concat(Y[c])
+        xm = np.c_[np.ones(len(x)), x.values] * np.sqrt(w.values)[:, None]
+        reg = ridge * np.eye(xm.shape[1]); reg[0, 0] = 0  # don't shrink the intercept
+        beta = np.linalg.solve(xm.T @ xm + reg, xm.T @ (y.values * np.sqrt(w.values)))
+        mult = np.exp(np.clip(np.c_[np.ones(len(feats[c])), feats[c].values] @ beta, -0.25, 0.25))
+        out[c] = out[c] * pd.Series(mult, index=feats[c].index).reindex(out.index).fillna(1.0)
+    out["FG%"], out["FT%"] = out.FGM / out.FGA, out.FTM / out.FTA
+    return out.reset_index()
 
 
 def _games_left(ids, injuries, schedule, players, today):

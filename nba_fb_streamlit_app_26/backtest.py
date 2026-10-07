@@ -42,7 +42,11 @@ def main():
     projs = {
         "repeat last season": pct(stats[(stats.source == "actual") & (stats.season == TARGET - 1)]),
         "ESPN 2025-26 proj": pct(stats[(stats.source == "espn") & (stats.season == TARGET)]),
-        "ours (default)": model.project(stats, TARGET, current_team=team, age=age, players=d["players"], starter=start),
+        "ours (default)": model.adjust(stats, TARGET, model.project(stats, TARGET, current_team=team, age=age,
+                                                                   players=d["players"], starter=start),
+                                       team, start, d["players"], age=age),
+        "ours, no context adjust": model.project(stats, TARGET, current_team=team, age=age, players=d["players"],
+                                                 starter=start),
         "ours, ESPN-blend minutes": model.project(stats, TARGET, current_team=team, age=age, roster_min=False),
         "ours, no ESPN input": model.project(stats, TARGET, espn_rate_blend=0, current_team=team, age=age,
                                              players=d["players"], starter=start),
