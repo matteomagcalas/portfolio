@@ -182,6 +182,11 @@ with tab_draft:
     positions = c2.multiselect("Position", POSITIONS)
     nba_teams = c3.multiselect("Team", NBA_TEAMS)
     hide = c4.toggle("Hide drafted", value=False)
+    with c4.popover("Reset draft", disabled=not (mine or taken)):
+        st.write(f"Clear all {len(mine)} Mine and {len(taken)} Taken picks?")
+        if st.button("Yes, reset", type="primary"):
+            qp.clear()  # picks live only in the URL
+            st.rerun()
     view = v
     if hide:
         view = view[~view.Mine & ~view.Taken]
