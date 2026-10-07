@@ -249,6 +249,19 @@ def adjust(stats, target, proj, team, starter, players, age=None, ridge=20.0, fi
     return out.reset_index()
 
 
+def project_by_role(stats, target, current_team, starter, players, injuries=None, schedule=None, age=None):
+    """Depth-chart starters keep the ESPN-blended minutes and plain rates; only non-starters get the
+    roster-minutes model and the learned context adjustment (bench players coming from bigger roles).
+    Backtest 2024-25 / 2025-26: starters' PTS bias -0.10/-0.54 (adjusting everyone) -> +0.24/-0.24;
+    bench bias stays fixed at -0.28/+0.08 (was +1.07/+1.53 before the roster model)."""
+    kw = dict(current_team=current_team, players=players, injuries=injuries, schedule=schedule, age=age)
+    plain = project(stats, target, roster_min=False, **kw).set_index("id")
+    bench = adjust(stats, target, project(stats, target, starter=starter, **kw), current_team, starter, players,
+                   age=age).set_index("id").reindex(plain.index)
+    is_start = starter.reindex(plain.index).fillna(0) == 1
+    return bench.where(~is_start & bench.PTS.notna(), plain).reset_index()
+
+
 def _games_left(ids, injuries, schedule, players, today):
     """Games each player can play this season: 82, minus team games already played, minus games
     before their injury return date. (ESPN's schedule omits unscheduled NBA Cup games, so we
