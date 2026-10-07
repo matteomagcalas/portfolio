@@ -3,7 +3,9 @@
 Projection = per-minute rates x projected minutes x projected games.
   rates:   last 3 seasons, near-flat season weights, shrunk toward league rate by
            minutes played, adjusted for age, blended with ESPN's projected rates
-  minutes: ESPN projected MPG blended with our history-based MPG
+  minutes: our roster model (roster_minutes): a regression trained on past seasons that predicts MPG
+           from a player's own minutes history plus his current roster's competition. No ESPN input.
+           ESPN's MPG is only the fallback for players with no NBA minutes last season (rookies etc.).
   games:   expected share of games (fit from median availability of prior seasons)
            x games left after the current injury's return date
 Value = sum of category z-scores over the draftable pool, minus replacement level,
@@ -40,11 +42,13 @@ AGE_CURVE = pd.DataFrame({
 
 def project(stats, target, weights=(1.0, 0.9, 0.8), shrink_min=600, espn_rate_blend=0.5,
             espn_min_blend=0.9, injuries=None, schedule=None, players=None,
-            today=None, current_team=None, moved_rate_blend=0.5, age=None):
+            today=None, current_team=None, moved_rate_blend=0.5, age=None, roster_min=True):
     """Per-game projections for season `target`, using only actual stats from earlier seasons.
     moved_rate_blend: ESPN rate weight for players who changed teams. Backtest (2025-26, 102
     movers) found leaning harder on ESPN slightly hurt, so it matches espn_rate_blend.
-    age: Series id -> age during `target`; defaults to players.age."""
+    age: Series id -> age during `target`; defaults to players.age.
+    roster_min: replace the ESPN-blended MPG with roster_minutes() wherever it has a prediction. Backtest
+    (2024-25 and 2025-26): PTS error 2.33->2.15 and 2.51->2.43, team-changer PTS bias +1.7 -> +0.3/+0.5."""
     hist = stats[(stats.source == "actual") & (stats.season < target) & (stats.season >= target - len(weights))
                  & (stats.GP > 0)].copy()
     hist["w"] = hist.season.map({target - 1 - i: w for i, w in enumerate(weights)})
@@ -87,6 +91,11 @@ def project(stats, target, weights=(1.0, 0.9, 0.8), shrink_min=600, espn_rate_bl
     out["MPG"] = np.where(mpg_espn.notna() & out.MPG.notna(),
                           espn_min_blend * mpg_espn + (1 - espn_min_blend) * out.MPG,
                           out.MPG.fillna(mpg_espn))
+    if roster_min and current_team is not None:
+        pl = players.set_index("id") if players is not None else pd.DataFrame(columns=["primary", "pos"])
+        group = pl.primary.fillna(pl.pos.str.split("/").str[0]).map(GROUPS)
+        mins = roster_minutes(stats, target, current_team, group, age if age is not None else pd.Series(dtype=float))
+        out["MPG"] = mins.reindex(out.index).fillna(out.MPG)
     out["health"] = out.health.fillna(ROOKIE_AVAIL) * AVAIL_SCALE
 
     for c in COUNT:
@@ -96,6 +105,59 @@ def project(stats, target, weights=(1.0, 0.9, 0.8), shrink_min=600, espn_rate_bl
     out["games"] = _games_left(out.index, injuries, schedule, players, today)  # games available
     out["GP"] = out.health * out.games  # expected games: what value uses
     return out.reset_index(names="id")
+
+
+GROUPS = {"PG": "G", "SG": "G", "SF": "F", "PF": "F", "C": "C"}
+
+
+def _minute_features(actual, T, roster, group, age):
+    """One row per rostered player with NBA minutes in season T-1. Uses only seasons before T."""
+    prev1 = actual[actual.season == T - 1].set_index("id")
+    prev2 = actual[actual.season == T - 2].set_index("id")
+    df = pd.DataFrame({"team": roster})
+    df["mpg1"] = prev1.MPG.reindex(df.index).fillna(0)
+    df["mpg2"] = prev2.MPG.reindex(df.index).fillna(0)
+    df["gp1"] = prev1.GP.reindex(df.index).fillna(0) / SEASON_GAMES
+    q = (prev1.PTS + prev1.REB + prev1.AST + 2 * (prev1.STL + prev1.BLK)) / prev1.MPG.where(prev1.MPG > 0)
+    df["quality"] = q.reindex(df.index).fillna(q.quantile(0.25))  # production per minute
+    last_team = prev1.team_id.reindex(df.index)
+    df["moved"] = ((last_team != df.team) & last_team.notna()).astype(float)
+    df["group"] = group.reindex(df.index).fillna("F")
+    df["age"] = age.reindex(df.index).fillna(25)
+    df["base"] = 0.7 * df.mpg1 + 0.3 * df.mpg2.where(df.mpg2 > 0, df.mpg1)
+    # competition: last season's minutes held by better-per-minute teammates, at his position group and overall
+    pairs = df.reset_index(names="id").merge(df.reset_index(names="mate"), on="team", suffixes=("", "_m"))
+    pairs = pairs[(pairs.id != pairs.mate) & (pairs.quality_m > pairs.quality)]
+    df["ahead_all"] = pairs.groupby("id").base_m.sum().reindex(df.index).fillna(0)
+    df["ahead_group"] = pairs[pairs.group == pairs.group_m].groupby("id").base_m.sum().reindex(df.index).fillna(0)
+    df["team_load"] = df.groupby("team").base.transform("sum")
+    df["qrank"] = df.groupby("team").quality.rank(ascending=False)
+    return df[df.mpg1 > 0]
+
+
+def _design(df):
+    x = df[["mpg1", "mpg2", "gp1", "quality", "moved", "age", "base", "ahead_group", "ahead_all", "team_load",
+            "qrank"]].astype(float)
+    return np.c_[np.ones(len(x)), x.values, (x.age - 27) ** 2, x.base * x.ahead_group / 60]
+
+
+def roster_minutes(stats, target, roster, group, age):
+    """Projected MPG for season `target` from minutes history + roster competition, no ESPN input.
+    Linear regression fit on every earlier season that has a prior season (players with 10+ GP).
+    roster: Series id -> team_id for `target`; group: id -> G/F/C; age: id -> age during `target`."""
+    actual = stats[(stats.source == "actual") & (stats.season < target)]
+    seasons = set(actual.season)
+    train = []
+    for T in sorted(seasons):
+        if T - 1 not in seasons:
+            continue
+        cur = actual[(actual.season == T) & (actual.GP >= 10) & (actual.team_id > 0)].set_index("id")
+        f = _minute_features(actual, T, cur.team_id, group, age - (target - T))
+        train.append(f.assign(y=cur.MPG))
+    train = pd.concat(train)
+    beta = np.linalg.lstsq(_design(train), train.y.values, rcond=None)[0]
+    f = _minute_features(actual, target, roster[roster > 0], group, age)
+    return pd.Series(np.clip(_design(f) @ beta, 0, 40), index=f.index)
 
 
 def _games_left(ids, injuries, schedule, players, today):

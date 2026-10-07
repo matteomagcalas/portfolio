@@ -40,8 +40,10 @@ def main():
     projs = {
         "repeat last season": pct(stats[(stats.source == "actual") & (stats.season == TARGET - 1)]),
         "ESPN 2025-26 proj": pct(stats[(stats.source == "espn") & (stats.season == TARGET)]),
-        "ours (default)": model.project(stats, TARGET, current_team=team, age=age),
-        "ours, no ESPN input": model.project(stats, TARGET, espn_rate_blend=0, espn_min_blend=0, age=age),
+        "ours (default)": model.project(stats, TARGET, current_team=team, age=age, players=d["players"]),
+        "ours, ESPN-blend minutes": model.project(stats, TARGET, current_team=team, age=age, roster_min=False),
+        "ours, no ESPN input": model.project(stats, TARGET, espn_rate_blend=0, current_team=team, age=age,
+                                             players=d["players"]),
     }
     ids = set.intersection(*(set(p.id) for p in projs.values()))  # same players for every method
     print(pd.DataFrame({k: score(p, actual, ids) for k, p in projs.items()}).T.round(3).to_string())
