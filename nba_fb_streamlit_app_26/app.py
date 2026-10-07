@@ -211,10 +211,10 @@ with tab_draft:
         for t in nba_teams:  # one totals row per selected team, in the order picked
             g = view[view.team == t]
             if len(g):
-                tot = {c: g[c].sum() for c in ["value", "MPG", "PTS", "REB", "AST", "STL", "BLK", "3PM", "TO"]}
+                tot = {c: g[c].sum() for c in ["value", "PTS", "REB", "AST", "STL", "BLK", "3PM", "TO"]}
                 tot["FG%"], tot["FT%"] = g.FGM.sum() / g.FGA.sum(), g.FTM.sum() / g.FTA.sum()  # attempt-weighted
                 rows.append({"name": f"{t} totals ({len(g)} players)", **tot})
-        st.dataframe(pd.DataFrame(rows)[["name", "value", *[c for c in STAT_COLS if c != "GP"]]], hide_index=True,
+        st.dataframe(pd.DataFrame(rows)[["name", "value", *[c for c in STAT_COLS if c not in ("GP", "MPG")]]], hide_index=True,
                      column_config=FMT)
         st.caption("Sum of per-game projections. Players miss games, so these run above what the team scores on a "
                    "given night.")
