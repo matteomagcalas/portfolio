@@ -206,6 +206,14 @@ with tab_draft:
     edited = st.data_editor(view[cols].head(400).style.apply(board_style, z=v, cats=cats, axis=None), hide_index=True, height=650, column_config=FMT,
                             disabled=[c for c in cols if c not in ("Mine", "Taken")],
                             key=f"ed-{hash((tuple(view.index[:400]), frozenset(mine), frozenset(taken)))}")
+    if len(nba_teams) == 1 and len(view):
+        tot = {c: view[c].sum() for c in ["value", "MPG", "PTS", "REB", "AST", "STL", "BLK", "3PM", "TO"]}
+        tot["FG%"], tot["FT%"] = view.FGM.sum() / view.FGA.sum(), view.FTM.sum() / view.FTA.sum()  # attempt-weighted
+        tot["name"] = f"{nba_teams[0]} totals ({len(view)} players)"
+        st.dataframe(pd.DataFrame([tot])[["name", "value", *[c for c in STAT_COLS if c != "GP"]]], hide_index=True,
+                     column_config=FMT)
+        st.caption("Sum of per-game projections. Players miss games, so these run above what the team scores on a "
+                   "given night.")
     shown = set(view.index[:400])
     new_mine = (mine - shown) | set(view.index[:400][edited.Mine.values])
     new_taken = (taken - shown) | set(view.index[:400][edited.Taken.values])
