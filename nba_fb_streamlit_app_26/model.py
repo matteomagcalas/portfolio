@@ -3,7 +3,7 @@
 Projection = per-minute rates x projected minutes x projected games.
   rates:   last 3 seasons weighted toward the most recent (1 / 0.6 / 0.3), shrunk toward league rate
            by minutes played, adjusted for age, blended with ESPN's projected rates
-  minutes: our roster model (roster_minutes): a regression trained on past seasons that predicts MPG
+  minutes: 80% our roster model (roster_minutes), 20% ESPN MPG. The roster model is a regression trained on past seasons that predicts MPG
            from a player's own minutes history, last season's starting role, this season's starting role
            (ESPN depth chart) and his current roster's competition. No ESPN projections.
            ESPN's MPG is only the fallback for players with no NBA minutes last season (rookies etc.).
@@ -45,7 +45,8 @@ AGE_CURVE = pd.DataFrame({
 
 def project(stats, target, weights=(1.0, 0.6, 0.3), shrink_min=300, espn_rate_blend=0.5,
             espn_min_blend=0.9, injuries=None, schedule=None, players=None,
-            today=None, current_team=None, moved_rate_blend=0.5, age=None, roster_min=True, starter=None):
+            today=None, current_team=None, moved_rate_blend=0.5, age=None, roster_min=True, starter=None,
+            roster_espn_blend=0.2):
     """Per-game projections for season `target`, using only actual stats from earlier seasons.
     weights/shrink_min: backtest 2024-25 and 2025-26, (1, .6, .3) with 300 had the lowest per-minute error of
     the grid in both seasons and less pull toward league average for stars than near-flat (1, .9, .8) / 600.
@@ -104,7 +105,11 @@ def project(stats, target, weights=(1.0, 0.6, 0.3), shrink_min=300, espn_rate_bl
         group = pl.primary.fillna(pl.pos.str.split("/").str[0]).map(GROUPS)
         mins = roster_minutes(stats, target, current_team, group, age if age is not None else pd.Series(dtype=float),
                               starter)
-        out["MPG"] = mins.reindex(out.index).fillna(out.MPG)
+        # 20% ESPN MPG: tested 0/20/35/50% on 2024-25 and 2025-26; 20% lowered PTS error and raised value rank
+        # in both (ESPN knows situations a few seasons of box scores can't: a star back from injury, a vacated role)
+        mins = mins.reindex(out.index)
+        mins = (1 - roster_espn_blend) * mins + roster_espn_blend * mpg_espn.where(mpg_espn.notna(), mins)
+        out["MPG"] = mins.fillna(out.MPG)
     out["health"] = out.health.fillna(ROOKIE_AVAIL) * AVAIL_SCALE
 
     for c in COUNT:
@@ -134,7 +139,14 @@ def _minute_features(actual, T, roster, group, age, starter):
     df["moved"] = ((last_team != df.team) & last_team.notna()).astype(float)
     df["group"] = group.reindex(df.index).fillna("F")
     df["age"] = age.reindex(df.index).fillna(25)
-    df["base"] = 0.7 * df.mpg1 + 0.3 * df.mpg2.where(df.mpg2 > 0, df.mpg1)
+    # minutes history weighted by recency AND games played, so an injury-shortened season counts less
+    prev3 = actual[actual.season == T - 3].set_index("id")
+    num = den = 0
+    for w, pv in zip((1.0, 0.6, 0.3), (prev1, prev2, prev3)):
+        gp = pv.GP.reindex(df.index).fillna(0) * w
+        num = num + gp * pv.MPG.reindex(df.index).fillna(0); den = den + gp
+    df["base"] = (num / den.where(den > 0)).fillna(df.mpg1)
+    df["short_gap"] = (df.base - df.mpg1) * (1 - df.gp1)  # minutes his short last season undersold
     df["gs1"] = prev1.GS.reindex(df.index).fillna(0)  # share of games started (ESPN per-game average)
     df["start"] = starter.reindex(df.index).fillna(0)
     df["benched"] = df.gs1 * (1 - df.start)  # started last season, not now
@@ -151,7 +163,7 @@ def _minute_features(actual, T, roster, group, age, starter):
 
 def _design(df):
     x = df[["mpg1", "mpg2", "gp1", "quality", "moved", "age", "base", "ahead_group", "ahead_all", "team_load",
-            "qrank", "gs1", "start", "benched", "promoted"]].astype(float)
+            "qrank", "gs1", "start", "benched", "promoted", "short_gap"]].astype(float)
     return np.c_[np.ones(len(x)), x.values, (x.age - 27) ** 2, x.base * x.ahead_group / 60,
                  x.base * x.benched, x.base * x.start]
 
