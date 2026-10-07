@@ -1,4 +1,7 @@
 """NBA Fantasy Hub: draft board, team view and waiver helper. Run: streamlit run app.py"""
+import hashlib
+from pathlib import Path
+
 import pandas as pd
 import streamlit as st
 
@@ -18,7 +21,7 @@ def data():
 
 
 @st.cache_data(show_spinner=False)
-def board(cats, pool_size, updated):
+def board(cats, pool_size, updated, code):  # code: model/espn version, so a push recomputes the board
     d = data()
     starter = d["depth"][d["depth"].slot == 0].drop_duplicates("id").set_index("id").slot.eq(0).astype(float)
     proj = model.project_by_role(d["stats"], espn.SEASON, d["players"].set_index("id").team_id, starter, d["players"],
@@ -125,7 +128,8 @@ if not cats:
     st.warning("Pick at least one category.")
     st.stop()
 
-v = board(tuple(cats), int(teams * roster), d["updated"])
+CODE = hashlib.md5(Path(model.__file__).read_bytes() + Path(espn.__file__).read_bytes()).hexdigest()
+v = board(tuple(cats), int(teams * roster), d["updated"], CODE)
 
 # Draft state lives in the URL, so a page refresh or bookmark keeps your picks.
 qp = st.query_params
