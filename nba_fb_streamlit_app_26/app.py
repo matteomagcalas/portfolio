@@ -31,10 +31,16 @@ def board(cats, pool_size, updated, code):  # code: model/espn version, so a pus
     starter = d["depth"][d["depth"].slot == 0].drop_duplicates("id").set_index("id").slot.eq(0).astype(float)
     proj = model.project_by_role(d["stats"], espn.SEASON, d["players"].set_index("id").team_id, starter, d["players"],
                                  injuries=d["injuries"], schedule=d["schedule"])
-    # No ESPN projection = ESPN doesn't see them in a rotation (G League call-ups, two-ways, fringe vets).
-    # Without this, a 10-game call-up stint at 30 MPG projects as a full-season starter.
-    s = d["stats"]
-    proj = proj[proj.id.isin(s.id[(s.source == "espn") & (s.season == espn.SEASON) & (s.MPG > 0)])]
+    # Who's on the board: ESPN projects him, Yahoo leagues draft him, or he's on a roster with a real NBA sample
+    # last season (30+ games, 500+ minutes). Keeps out 10-game G League call-ups, whose stints at 30 MPG
+    # would otherwise project as full-season starters.
+    s, pl = d["stats"], d["players"]
+    last = s[(s.source == "actual") & (s.season == espn.SEASON - 1)]
+    sample = last.id[(last.GP >= 30) & (last.GP * last.MPG >= 500)]
+    rostered = pl.id[pl.team_id > 0]
+    keep = (set(s.id[(s.source == "espn") & (s.season == espn.SEASON) & (s.MPG > 0)]) | set(pl.id[pl.adp.notna()])
+            | (set(sample) & set(rostered)))
+    proj = proj[proj.id.isin(keep)]
     v = model.value(proj, list(cats), pool_size)
     inj = d["injuries"].drop_duplicates("id").set_index("id")
     v = v.merge(d["players"], on="id", how="left")
