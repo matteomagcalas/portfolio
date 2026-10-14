@@ -148,7 +148,8 @@ FMT = {c: st.column_config.NumberColumn(format="%.1f") for c in STAT_COLS}
 FMT.update({"FG%": st.column_config.NumberColumn(format="%.3f"), "FT%": st.column_config.NumberColumn(format="%.3f"),
             "GP": st.column_config.NumberColumn(format="%.0f", help="Projected games played: games left after known "
                                                 "injuries x expected availability from injury history"),
-            "adp": st.column_config.NumberColumn("ADP", format="%.1f"),
+            "adp": st.column_config.NumberColumn("ADP", format="%.1f", help="Yahoo average draft position. "
+                                                 "Blank = not being drafted in Yahoo leagues"),
             "age": st.column_config.NumberColumn("Age", format="%.0f"),
             "value": st.column_config.NumberColumn("Value", format="%.2f",
                                                    help="Season value: z-scores x projected games. Never negative: about 0.7 = "

@@ -2,6 +2,7 @@
 injuries, rosters, schedules) is re-pulled when older than MAX_AGE_HOURS."""
 import re
 import time
+import unicodedata
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -49,6 +50,33 @@ def _stat_rows(players, season):
     return rows
 
 
+YAHOO = ("https://pub-api-rw.fantasysports.yahoo.com/fantasy/v2/game/nba/players;sort=DA_AP;start={};count=50;"
+         "out=draft_analysis?format=json")
+
+
+def _norm(name):
+    """'Nikola Jokić Jr.' -> 'nikola jokic': matches player names across ESPN and Yahoo."""
+    name = unicodedata.normalize("NFKD", name).encode("ascii", "ignore").decode().lower()
+    name = re.sub(r"[^a-z ]", "", name.replace("-", " "))
+    return " ".join(w for w in name.split() if w not in {"jr", "sr", "ii", "iii", "iv"})
+
+
+def _yahoo_adp(max_players=400):
+    """Yahoo average draft position (public draft-analysis feed), keyed by normalized name."""
+    rows = []
+    for start in range(0, max_players, 50):
+        ps = _get(YAHOO.format(start), headers={"User-Agent": "Mozilla/5.0"})["fantasy_content"]["game"][1]["players"]
+        if not isinstance(ps, dict) or not ps.get("count"):
+            break
+        for k in range(ps["count"]):
+            info, da = ps[str(k)]["player"]
+            info = {key: v for d in info if isinstance(d, dict) for key, v in d.items()}
+            pick = {key: v for d in da["draft_analysis"] for key, v in d.items()}["average_pick"]
+            if pick not in ("-", None, ""):
+                rows.append({"key": _norm(info["name"]["full"]), "yahoo_adp": float(pick)})
+    return pd.DataFrame(rows).drop_duplicates("key")
+
+
 def _players(season):
     return _get(FANTASY.format(season), headers={"X-Fantasy-Filter": FILTER})["players"]
 
@@ -82,7 +110,7 @@ def refresh(force=False):
     pd.DataFrame(games).to_csv(DATA / "schedule.csv", index=False)
     pd.DataFrame(depth, columns=["id", "team_id", "pos", "slot"]).to_csv(DATA / "depth.csv", index=False)
 
-    pd.DataFrame([{
+    players = pd.DataFrame([{
         "id": e["player"]["id"],
         "name": e["player"]["fullName"],
         "team": teams.get(e["player"].get("proTeamId"), "FA"),
@@ -91,7 +119,13 @@ def refresh(force=False):
         "primary": SLOT.get(e["player"].get("defaultPositionId", 0) - 1),  # ESPN: 1=PG ... 5=C
         "age": ages.get(e["player"]["id"]),
         "adp": (e["player"].get("ownership") or {}).get("averageDraftPosition"),
-    } for e in current]).to_csv(DATA / "players.csv", index=False)
+    } for e in current])
+    try:  # draft on Yahoo, so use Yahoo's ADP; ESPN's stays as the fallback if Yahoo is unreachable
+        y = _yahoo_adp()
+        players["adp"] = players.name.map(_norm).map(y.set_index("key").yahoo_adp)
+    except Exception:
+        pass
+    players.to_csv(DATA / "players.csv", index=False)
 
     inj = []
     for t in _get(f"{SITE}/injuries")["injuries"]:
