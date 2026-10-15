@@ -198,6 +198,7 @@ with tab_draft:
         st.write(f"Clear all {len(mine)} Mine and {len(taken)} Taken picks?")
         if st.button("Yes, reset", type="primary"):
             qp.clear()  # picks live only in the URL
+            st.session_state.resets = st.session_state.get("resets", 0) + 1  # drop the editor's remembered ticks
             st.rerun()
     view = v
     if hide:
@@ -214,10 +215,11 @@ with tab_draft:
                f"draftable pool, red = hurts (FG%/FT% weighted by attempts, high TO is red).")
     cols = ["Mine", "Taken", "adp", "Rank", "ADPval", "PosRank", "name", "team", "pos", "age", "value",
             *STAT_COLS, "Injury"]
-    # key changes with the data so the editor never replays stale edits onto different rows
-    edited = st.data_editor(view[cols].head(400).style.apply(board_style, z=v, cats=cats, axis=None), hide_index=True, height=650, column_config=FMT,
-                            disabled=[c for c in cols if c not in ("Mine", "Taken")],
-                            key=f"ed-{hash((tuple(view.index[:400]), frozenset(mine), frozenset(taken)))}")
+    # The key follows the rows shown (not the picks), so a tick keeps the same editor and your scroll spot,
+    # and edits never replay onto different rows after a filter change.
+    edited = st.data_editor(view[cols].head(400).style.apply(board_style, z=v, cats=cats, axis=None), hide_index=True,
+                            height=650, column_config=FMT, disabled=[c for c in cols if c not in ("Mine", "Taken")],
+                            key=f"ed-{hash((tuple(view.index[:400]), st.session_state.get('resets', 0)))}")
     if nba_teams and len(view):
         rows = []
         for t in nba_teams:  # one totals row per selected team, in the order picked
