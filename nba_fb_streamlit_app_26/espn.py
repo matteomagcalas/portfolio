@@ -20,7 +20,7 @@ FILTER = '{"players":{"limit":2000,"sortPercOwned":{"sortPriority":1,"sortAsc":f
 STAT = {"0": "PTS", "1": "BLK", "2": "STL", "3": "AST", "6": "REB", "11": "TO", "13": "FGM", "14": "FGA",
         "15": "FTM", "16": "FTA", "17": "3PM", "18": "3PA", "40": "MPG", "41": "GS", "42": "GP"}
 SLOT = {0: "PG", 1: "SG", 2: "SF", 3: "PF", 4: "C"}
-SEASON_OUT = re.compile(rf"(miss|out for) the (remainder of the |rest of the |entire )?({SEASON - 1}-{SEASON % 100} )?season", re.I)
+SEASON_OUT = re.compile(rf"season-ending|(miss|out for) the (remainder of the |rest of the |entire )?({SEASON - 1}-{SEASON % 100} )?season", re.I)
 
 
 def _get(url, **kw):

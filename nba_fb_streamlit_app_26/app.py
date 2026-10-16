@@ -48,6 +48,9 @@ def board(cats, pool_size, updated, code):  # code: model/espn version, so a pus
     back = inj.return_date.map(lambda r: f"{pd.Timestamp(r):%m/%d}" if isinstance(r, str) else "")
     v["Injury"] = v.id.map((status + " " + back.where(~inj.season_out.astype(bool), "season")).str.strip()).fillna("")
     v["note"] = v.id.map(inj.note).fillna("")
+    out = v.GP == 0  # out for the season: no stats to project
+    v.loc[out, ["MPG", "PTS", "REB", "AST", "STL", "BLK", "3PM", "FG%", "FT%", "TO", "FGM", "FGA", "FTM", "FTA",
+               *[f"z_{c}" for c in cats]]] = None
     v["Rank"] = range(1, len(v) + 1)
     v["ADPval"] = v.adp - v.Rank  # + = we rank them ahead of the market (a steal)
     primary = v.primary.fillna(v.pos.str.split("/").str[0]).map({"PG": "G", "SG": "G", "SF": "F", "PF": "F", "C": "C"}).fillna("")
@@ -146,7 +149,21 @@ v = board(tuple(cats), int(teams * roster), d["updated"], CODE)
 qp = st.query_params
 mine = {int(x) for x in qp.get("mine", "").split(",") if x}
 taken = {int(x) for x in qp.get("taken", "").split(",") if x}
+starred = {int(x) for x in qp.get("star", "").split(",") if x}
 v["Mine"], v["Taken"] = v.index.isin(mine), v.index.isin(taken)
+v["Star"] = v.index.map(lambda i: "⭐" if i in starred else "☆")
+
+
+def toggle_star(key):
+    """Button-column callback: flip the star on the clicked row (ids saved when that table was drawn)."""
+    pid = st.session_state[f"{key}_ids"][st.session_state[key]["row"]]
+    stars = {int(x) for x in st.query_params.get("star", "").split(",") if x} ^ {pid}
+    st.query_params["star"] = ",".join(map(str, sorted(stars)))
+
+
+def star_col(key):
+    return st.column_config.ButtonColumn("", width=40, type="tertiary", on_click=toggle_star, args=(key,), key=key,
+                                         help="Star a player to bookmark them in the Starred tab")
 NBA_TEAMS = sorted(v.team.dropna().unique())
 
 STAT_COLS = ["GP", "MPG", "PTS", "REB", "AST", "STL", "BLK", "3PM", "FG%", "FT%", "TO"]
@@ -185,7 +202,8 @@ else:
 m3.metric("Your picks", len(mine), f"{len(taken)} taken by others", delta_color="off", border=True)
 m4.metric("ESPN data", f"{ago:.0f}h ago" if ago >= 1 else "just now", "refreshes about every 12h",
           delta_color="off", border=True)
-tab_draft, tab_team, tab_waiver = st.tabs([":material/sports_basketball: Draft board", ":material/groups: My team",
+tab_draft, tab_team, tab_star, tab_waiver = st.tabs([":material/sports_basketball: Draft board",
+                                                     ":material/groups: My team", ":material/star: Starred",
                                            ":material/swap_horiz: Waivers / pickups"])
 
 with tab_draft:
@@ -197,7 +215,9 @@ with tab_draft:
     with c4.popover("Reset draft", disabled=not (mine or taken)):
         st.write(f"Clear all {len(mine)} Mine and {len(taken)} Taken picks?")
         if st.button("Yes, reset", type="primary"):
-            qp.clear()  # picks live only in the URL
+            for k in ("mine", "taken"):  # picks live only in the URL; stars stay
+                if k in qp:
+                    del qp[k]
             st.session_state.resets = st.session_state.get("resets", 0) + 1  # drop the editor's remembered ticks
             st.rerun()
     view = v
@@ -213,12 +233,13 @@ with tab_draft:
     st.caption(f"Tick **Mine** for your picks and **Taken** for everyone else's. "
                f"{len(mine)} mine, {len(taken)} taken by others. Category colors: green = helps you vs. the "
                f"draftable pool, red = hurts (FG%/FT% weighted by attempts, high TO is red).")
-    cols = ["Mine", "Taken", "adp", "Rank", "ADPval", "PosRank", "name", "team", "pos", "age", "value",
+    cols = ["Star", "Mine", "Taken", "adp", "Rank", "ADPval", "PosRank", "name", "team", "pos", "age", "value",
             *STAT_COLS, "Injury"]
     # The key follows the rows shown (not the picks), so a tick keeps the same editor and your scroll spot,
     # and edits never replay onto different rows after a filter change.
+    st.session_state.star_draft_ids = list(view.index[:400])
     edited = st.data_editor(view[cols].head(400).style.apply(board_style, z=v, cats=cats, axis=None), hide_index=True,
-                            height=650, column_config=FMT, disabled=[c for c in cols if c not in ("Mine", "Taken")],
+                            height=650, column_config={**FMT, "Star": star_col("star_draft")}, disabled=[c for c in cols if c not in ("Star", "Mine", "Taken")],
                             key=f"ed-{hash((tuple(view.index[:400]), st.session_state.get('resets', 0)))}")
     if nba_teams and len(view):
         rows = []
@@ -239,6 +260,15 @@ with tab_draft:
         qp["mine"] = ",".join(map(str, sorted(new_mine)))
         qp["taken"] = ",".join(map(str, sorted(new_taken)))
         st.rerun()
+
+with tab_star:
+    fav = v[v.Star == "⭐"]
+    if fav.empty:
+        st.info("Click the ☆ next to a player on the draft board to star them.")
+    else:
+        st.session_state.star_tab_ids = list(fav.index)
+        st.dataframe(fav[[c for c in cols if c not in ("Mine", "Taken")]].style.apply(board_style, z=v, cats=cats, axis=None),
+                     hide_index=True, column_config={**FMT, "Star": star_col("star_tab")})
 
 with tab_team:
     team = v[v.Mine]

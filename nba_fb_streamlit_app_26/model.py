@@ -277,7 +277,8 @@ def _games_left(ids, injuries, schedule, players, today):
     for t, r, out in zip(team, ret, inj.season_out.fillna(False).astype(bool)):
         games = sched.date[sched.team_id == t]
         missed = ((games >= today) & (games < r)).sum()
-        left.append(0 if out or games.empty else max(0, SEASON_GAMES - (games < today).sum() - missed))
+        done = games.empty or r > games.max()  # back after the last game = out for the season
+        left.append(0 if out or done else max(0, SEASON_GAMES - (games < today).sum() - missed))
     return pd.Series(left, index=ids, dtype=float)
 
 
@@ -296,8 +297,7 @@ def games_between(ids, injuries, schedule, players, start, end):
 def value(proj, cats, pool_size, weights=None, iterations=3):
     """Z-score value per game and per season, measured against the top `pool_size` players.
     weights: {category: multiplier} applied when summing z-scores (default CAT_WEIGHTS)."""
-    df = proj.dropna(subset=["PTS"]).copy()
-    df = df[df.GP > 0]
+    df = proj.dropna(subset=["PTS"]).copy()  # GP 0 (out for the season) stays listed, with value 0
     score = df.MPG * df.GP  # initial pool guess: who plays the most
     for _ in range(iterations):
         pool = df.loc[score.nlargest(pool_size).index]
@@ -314,10 +314,11 @@ def value(proj, cats, pool_size, weights=None, iterations=3):
             z["TO"] = -z["TO"]
         per_game = z.mul(pd.Series({c: (weights or CAT_WEIGHTS).get(c, 1.0) for c in cats})).sum(axis=1)
         replacement = per_game.loc[pool.index].min()
-        score = (per_game - replacement) * df.GP / SEASON_GAMES
+        # softplus per game, THEN times the share of games played: about equal to value over replacement for
+        # good players, slides toward 0 (never below) under replacement, and always scales with availability,
+        # so a player out most of the year is worth little no matter how good he is per game.
+        score = np.logaddexp(0, per_game - replacement) * df.GP / SEASON_GAMES
     df[[f"z_{c}" for c in cats]] = z.values
     df["value_pg"] = per_game.round(2)
-    # softplus: about equal to value over replacement for good players, slides toward 0 (never below) for
-    # players under replacement, since drafting a 15th man doesn't hurt you. Monotonic, so ranks don't change.
-    df["value"] = np.logaddexp(0, score).round(2)
+    df["value"] = score.round(2)
     return df.assign(_s=score).sort_values("_s", ascending=False).drop(columns="_s")  # exact order, not rounded ties
