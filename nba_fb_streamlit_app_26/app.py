@@ -239,7 +239,7 @@ else:
 m3.metric("Your picks", len(mine), f"{len(taken)} taken by others", delta_color="off", border=True)
 m4.metric("ESPN data", f"{ago:.0f}h ago" if ago >= 1 else "just now", "refreshes about every 12h",
           delta_color="off", border=True)
-tab_draft, tab_team, tab_star, tab_waiver = st.tabs([":material/sports_basketball: Draft board",
+tab_draft, tab_team, tab_star, tab_waiver = st.tabs([":material/sports_basketball: Available Players",
                                                      ":material/groups: My team", ":material/star: Starred",
                                            ":material/swap_horiz: Waivers / pickups"])
 
@@ -248,7 +248,7 @@ with tab_draft:
     search = c1.text_input("Search player")
     positions = c2.multiselect("Position", POSITIONS)
     nba_teams = c3.multiselect("Team", NBA_TEAMS)
-    hide = c4.toggle("Hide drafted", value=False)
+    hide = c4.toggle("Hide drafted", value=True)
     with c4.popover("Reset draft", disabled=synced or not (mine or taken)):
         st.write(f"Clear all {len(mine)} Mine and {len(taken)} Taken picks?")
         if st.button("Yes, reset", type="primary"):
@@ -302,8 +302,13 @@ with tab_draft:
 with tab_star:
     fav = v[v.Star == "⭐"]
     if fav.empty:
-        st.info("Click the ☆ next to a player on the draft board to star them.")
+        st.info("Click the ☆ next to a player on the Available Players tab to star them.")
     else:
+        with st.popover("Clear starred"):
+            st.write(f"Unstar all {len(fav)} players?")
+            if st.button("Yes, clear", type="primary"):
+                del st.query_params["star"]
+                st.rerun()
         st.session_state.star_tab_ids = list(fav.index)
         st.dataframe(fav[[c for c in cols if c not in ("Mine", "Taken")]].style.apply(board_style, z=v, cats=cats, axis=None),
                      hide_index=True, column_config={**FMT, "Star": star_col("star_tab")})
@@ -311,7 +316,7 @@ with tab_star:
 with tab_team:
     team = v[v.Mine]
     if team.empty:
-        st.info("Tick **Mine** on the draft board to build your team.")
+        st.info("Tick **Mine** on the Available Players tab to build your team.")
     else:
         st.subheader("Category strength")
         st.caption("Sum of your players' z-scores per category. Positive = above an average team's pace.")
@@ -367,7 +372,7 @@ with tab_team:
 with tab_waiver:
     team = v[v.Mine]
     if team.empty:
-        st.info("Tick **Mine** on the draft board first; pickups are compared against your roster.")
+        st.info("Tick **Mine** on the Available Players tab first; pickups are compared against your roster.")
     else:
         worst = team.sort_values("value").iloc[0]
         st.caption(f"Free agents ranked by value. Your lowest-value player is **{worst['name']}** ({worst.value:.2f}). "
