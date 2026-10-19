@@ -16,11 +16,12 @@ st.markdown("""<style>
 </style>""", unsafe_allow_html=True)
 
 
+CODE = hashlib.md5(Path(model.__file__).read_bytes() + Path(espn.__file__).read_bytes()).hexdigest()
 ESPN_IMG = "https://a.espncdn.com/combiner/i?img="  # resizes ESPN headshots/logos server side
 
 
 @st.cache_data(ttl=3600, show_spinner="Pulling latest ESPN data (about a minute the first time)...")
-def data():
+def data(code):  # code: espn.py/model.py version, so a push never serves data loaded by older code
     espn.refresh()
     return espn.load()
 
@@ -33,7 +34,7 @@ def season_day(d):
 
 @st.cache_data(show_spinner=False)
 def board(cats, pool_size, updated, code):  # code: model/espn version, so a push recomputes the board
-    d = data()
+    d = data(CODE)
     # Rest of season: the preseason projection (frozen the night before tip-off) updated with every game
     # played so far, as much as the backtest says games should count (model.in_season). Before opening
     # night there are no games and this is just the preseason projection.
@@ -80,9 +81,6 @@ def board(cats, pool_size, updated, code):  # code: model/espn version, so a pus
     v["Logo"] = v.team.map(lambda t: f"{ESPN_IMG}/i/teamlogos/nba/500/{t.lower()}.png&w=40&h=40"
                            if isinstance(t, str) and t != "FA" else None)
     return v.set_index("id")
-
-
-CODE = hashlib.md5(Path(model.__file__).read_bytes() + Path(espn.__file__).read_bytes()).hexdigest()
 
 
 @st.cache_data(ttl=600, show_spinner="Syncing your Yahoo league...")
@@ -179,7 +177,7 @@ with st.sidebar:
     roster = st.number_input("Roster spots per team", 5, 20, 13)
     cats = st.multiselect("Categories (remove one to punt it)", model.CATS[fmt], default=model.CATS[fmt])
     st.divider()
-    d = data()
+    d = data(CODE)
     st.caption(f"ESPN data updated {pd.Timestamp(d['updated']).tz_convert('America/New_York'):%b %d, %I:%M %p} ET. "
                "Refreshes itself about every 6 hours.")
     if st.button("Refresh now"):
