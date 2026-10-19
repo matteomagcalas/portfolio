@@ -61,8 +61,11 @@ def board(cats, pool_size, updated, code):  # code: model/espn version, so a pus
     return v.set_index("id")
 
 
+CODE = hashlib.md5(Path(model.__file__).read_bytes() + Path(espn.__file__).read_bytes()).hexdigest()
+
+
 @st.cache_data(ttl=600, show_spinner="Syncing your Yahoo league...")
-def league(league_id):
+def league(league_id, code):  # code: espn.py version, so a push never serves rosters cached by older code
     return espn.yahoo_league(league_id)
 
 
@@ -139,7 +142,7 @@ with st.sidebar:
         st.query_params["league"] = league_id
     if league_id:
         try:
-            rosters, moves = league(league_id)
+            rosters, moves = league(league_id, CODE)
         except Exception as e:
             st.error(f"Couldn't read Yahoo league {league_id} (is it public?): {e}")
     if rosters is not None and len(rosters):
@@ -165,7 +168,6 @@ if not cats:
     st.warning("Pick at least one category.")
     st.stop()
 
-CODE = hashlib.md5(Path(model.__file__).read_bytes() + Path(espn.__file__).read_bytes()).hexdigest()
 v = board(tuple(cats), int(teams * roster), d["updated"], CODE)
 
 # Draft state lives in the URL, so a page refresh or bookmark keeps your picks.
