@@ -84,7 +84,7 @@ def _flat(parts):
 
 def yahoo_league(league_id):
     """Live rosters and recent moves of a public Yahoo league (no login needed).
-    Returns (rosters: team_id, team, key, name; moves: time, type, name, from, to); key = normalized name."""
+    Returns (rosters: team_id, team, key, name, slot (today's Yahoo slot: PG..Util, BN, IL); moves: time, type, name, from, to); key = normalized name."""
     url = f"https://pub-api-rw.fantasysports.yahoo.com/fantasy/v2/league/nba.l.{league_id}/{{}}?format=json"
     h = {"User-Agent": "Mozilla/5.0"}
     teams = _get(url.format("teams/roster"), headers=h)["fantasy_content"]["league"][1]["teams"]
@@ -93,8 +93,11 @@ def yahoo_league(league_id):
         t = teams[str(k)]["team"]
         info, ps = _flat(t[0]), t[1]["roster"]["0"]["players"]
         for j in range(ps.get("count", 0) if isinstance(ps, dict) else 0):
-            name = _flat(ps[str(j)]["player"][0])["name"]["full"]
-            rosters.append({"team_id": int(info["team_id"]), "team": info["name"], "key": _norm(name), "name": name})
+            p = ps[str(j)]["player"]
+            name = _flat(p[0])["name"]["full"]
+            slot = _flat(p[1]["selected_position"]).get("position", "") if len(p) > 1 else ""
+            rosters.append({"team_id": int(info["team_id"]), "team": info["name"], "key": _norm(name), "name": name,
+                            "slot": slot})
     tx = _get(url.format("transactions"), headers=h)["fantasy_content"]["league"][1]["transactions"]
     moves = []
     for k in range(tx.get("count", 0) if isinstance(tx, dict) else 0):

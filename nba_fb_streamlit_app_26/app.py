@@ -172,6 +172,7 @@ v = board(tuple(cats), int(teams * roster), d["updated"], CODE)
 qp = st.query_params
 mine = {int(x) for x in qp.get("mine", "").split(",") if x}
 taken = {int(x) for x in qp.get("taken", "").split(",") if x}
+il = set()  # my players in Yahoo IL slots: off the lineup, shown as their own IL rows
 synced = rosters is not None and len(rosters) > 0
 if synced:  # Yahoo is the source of truth: rosters already include every waiver and trade
     ids = d["players"].assign(key=d["players"].name.map(espn._norm)).drop_duplicates("key").set_index("key").id
@@ -179,6 +180,7 @@ if synced:  # Yahoo is the source of truth: rosters already include every waiver
     rostered = rosters[rosters.id.isin(v.index)]
     mine = set(rostered.id[rostered.team_id == my_team].astype(int))
     taken = set(rostered.id[rostered.team_id != my_team].astype(int))
+    il = set(rostered.id[(rostered.team_id == my_team) & rostered.slot.str.startswith("IL")].astype(int))
     unmatched = rosters.name[rosters.id.isna()]
     if len(unmatched):
         st.sidebar.caption("Not on the board (can't project): " + ", ".join(unmatched))
@@ -323,7 +325,7 @@ with tab_team:
         week = (start - pd.Timedelta(days=start.weekday()), start + pd.Timedelta(days=6 - start.weekday()))
         v["wk_games"] = model.games_between(v.index, d["injuries"], d["schedule"], d["players"], start, week[1]).values
         team = v[v.Mine]
-        lineup = fill_lineup(team)
+        lineup = fill_lineup(team.drop(il & set(team.index)))
         free = v[~v.Mine & ~v.Taken & (v.wk_games > 0)]
 
         st.subheader(f"Positional needs: week of {week[0]:%b %d} - {week[1]:%b %d}")
@@ -342,8 +344,10 @@ with tab_team:
                          "Best available": best["name"] if best is not None else "",
                          "Their value": best.value if best is not None else None,
                          "Upgrade": round(best.value - cur_val, 2) if best is not None else None})
+        rows += [{"Slot": "IL", "Starter": p["name"], "Value": p.value, "Games this wk": p.wk_games}
+                 for _, p in team[team.index.isin(il)].iterrows()]  # no IL rows when nobody's on IL
         needs = pd.DataFrame(rows)
-        bench = team.drop([p for p in lineup.values() if p is not None])
+        bench = team.drop([p for p in lineup.values() if p is not None] + list(il & set(team.index)))
         top = needs[needs.Upgrade > 0].sort_values("Upgrade", ascending=False).drop_duplicates("Best available").head(3)
         if top.empty:
             st.success("No undrafted player beats any of your starters right now.")
