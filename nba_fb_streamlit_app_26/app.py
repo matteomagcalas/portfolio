@@ -105,7 +105,7 @@ def injury_badge(s):
             f"color: {'#FF8A8A' if bad else '#FFC266'}; font-weight: 600")
 
 
-SLOTS = ["PG", "SG", "G", "SF", "PF", "F", "C", "C", "Util", "Util"]  # Yahoo standard starting lineup
+SLOTS = ["PG", "SG", "G", "SF", "PF", "F", "C", "Util", "Util", "Util"]  # this league: 1 C, 3 Util
 SLOT_OK = {"G": {"PG", "SG"}, "F": {"SF", "PF"}, "Util": {"PG", "SG", "SF", "PF", "C"}}
 
 
