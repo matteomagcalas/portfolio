@@ -11,7 +11,7 @@ import requests
 
 SEASON = 2027  # ESPN labels a season by its end year: 2027 = 2026-27
 FIRST_SEASON = 2022
-MAX_AGE_HOURS = 12
+MAX_AGE_HOURS = 6  # in season: box scores and injury reports change daily
 DATA = Path(__file__).parent / "data"
 
 FANTASY = "https://lm-api-reads.fantasy.espn.com/apis/v3/games/fba/seasons/{}/segments/0/leaguedefaults/3?view=kona_player_info"
@@ -48,6 +48,27 @@ def _stat_rows(players, season):
                              "team_id": p.get("proTeamId") if s["seasonId"] == season and s["statSourceId"] == 0 else None,
                              **{name: a.get(k, 0.0) for k, name in STAT.items()}})
     return rows
+
+
+def _game_rows(players, season):
+    """Box score per player per game played: day = ESPN scoring period (1 = opening night), team = team that night."""
+    rows = []
+    for e in players:
+        p = e["player"]
+        for s in p.get("stats", []):
+            g = s.get("stats") or {}
+            if s.get("statSplitTypeId") == 5 and s.get("seasonId") == season and s.get("statSourceId") == 0 and g.get("42"):
+                rows.append({"id": p["id"], "day": s["scoringPeriodId"], "team_id": s.get("proTeamId"),
+                             **{name: g.get(k, 0.0) for k, name in STAT.items() if name != "GP"}})
+    return pd.DataFrame(rows, columns=["id", "day", "team_id", *[n for n in STAT.values() if n != "GP"]])
+
+
+def games(season):
+    """Game logs for a season: finished seasons cached forever, the current one written by refresh()."""
+    f = DATA / f"games_{season}.csv"
+    if not f.exists():
+        _game_rows(_players(season), season).to_csv(f, index=False)
+    return pd.read_csv(f)
 
 
 YAHOO = ("https://pub-api-rw.fantasysports.yahoo.com/fantasy/v2/game/nba/players;sort=DA_AP;start={};count=50;"
@@ -121,7 +142,7 @@ def _players(season):
 def refresh(force=False):
     DATA.mkdir(exist_ok=True)
     stamp = DATA / "updated.txt"
-    if not force and stamp.exists() and (DATA / "depth.csv").exists() and time.time() - stamp.stat().st_mtime < MAX_AGE_HOURS * 3600:
+    if not force and stamp.exists() and (DATA / f"games_{SEASON}.csv").exists() and time.time() - stamp.stat().st_mtime < MAX_AGE_HOURS * 3600:
         return
 
     history = DATA / "history.csv"  # finished seasons never change, pull once
@@ -131,6 +152,7 @@ def refresh(force=False):
 
     current = _players(SEASON)
     pd.DataFrame(_stat_rows(current, SEASON)).to_csv(DATA / "current.csv", index=False)  # last season + this season's ESPN proj
+    _game_rows(current, SEASON).to_csv(DATA / f"games_{SEASON}.csv", index=False)  # this season's box scores so far
 
     teams = {int(t["team"]["id"]): t["team"]["abbreviation"]
              for t in _get(f"{SITE}/teams")["sports"][0]["leagues"][0]["teams"]}
@@ -188,6 +210,8 @@ def load():
         "injuries": pd.read_csv(DATA / "injuries.csv"),
         "schedule": pd.read_csv(DATA / "schedule.csv"),
         "depth": pd.read_csv(DATA / "depth.csv"),
+        "games": pd.read_csv(DATA / f"games_{SEASON}.csv"),
+        "preseason": pd.read_csv(DATA / "preseason.csv"),  # frozen before opening night: the in-season prior
         "updated": (DATA / "updated.txt").read_text(),
     }
 

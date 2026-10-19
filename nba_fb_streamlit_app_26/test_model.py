@@ -26,4 +26,14 @@ injuries = pd.DataFrame({"id": [2, 3], "status": "Out", "return_date": ["2026-11
                          "season_out": [False, True], "note": ""})
 left = model._games_left(pd.Index([1, 2, 3]), injuries, schedule, players, "2026-10-01")
 assert list(left) == [82, 67, 0], left
+# in-season: one 40-point game shouldn't turn a 10-point scorer into a star, a full season of 20s should move him most of the way
+prior = pd.DataFrame({"id": [7], "MPG": [25.0], "health": [0.8], **{c: [10.0 if c == "PTS" else 2.0] for c in model.COUNT}})
+def game(day, pts, mins=25.0):
+    return {"id": 7, "day": day, "team_id": 1, "MPG": mins, **{c: (pts if c == "PTS" else 2.0) for c in model.COUNT}}
+one = model.in_season(prior, pd.DataFrame([game(1, 40)]), 2, **model.IN_SEASON).iloc[0]
+season = model.in_season(prior, pd.DataFrame([game(d, 20) for d in range(1, 120, 2)]), 120, **model.IN_SEASON).iloc[0]
+none = model.in_season(prior, pd.DataFrame([game(1, 40)]).iloc[:0], 1, **model.IN_SEASON).iloc[0]
+assert 10 < one.PTS < 15, one.PTS
+assert season.PTS > 17, season.PTS
+assert abs(none.PTS - 10) < 1e-9, none.PTS
 print("ok")

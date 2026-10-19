@@ -262,6 +262,81 @@ def project_by_role(stats, target, current_team, starter, players, injuries=None
     return bench.where(~is_start & bench.PTS.notna(), plain).reset_index()
 
 
+# In-season blend, fit by backtest_inseason.py on 2023-24..2025-26 (refit leaving each season out: nearly the same).
+# K = minutes of play the preseason rate is worth; tau = days for a game's weight to fall to 37%. 1e12 = this
+# season's games never beat the prior for that rate (REB, STL, TO per minute are that stable). Minutes react fast
+# (prior worth 4 games, 30-day fade); availability: prior worth 40 team games. Held-out rest-of-season PTS error
+# vs preseason-only / season-to-date-only: first month 2.70 vs 3.07/3.60, months 2-3 2.58 vs 3.28/2.97.
+IN_SEASON = dict(K={"PTS": 200, "REB": 1e12, "AST": 400, "STL": 1e12, "BLK": 400, "3PM": 400, "TO": 1e12, "FGM": 400,
+                    "FGA": 200, "FTM": 400, "FTA": 400},
+                 tau={"PTS": 120, "REB": np.inf, "AST": 120, "STL": np.inf, "BLK": 120, "3PM": np.inf, "TO": np.inf,
+                      "FGM": 120, "FGA": 120, "FTM": 120, "FTA": 120},
+                 Km=4, tau_m=30, Kh=40, new_mpg=10)
+
+
+# Next-2-week MPG change per unit of promotion(): fit on 2023-24..2025-26 checkpoints, "starting now" = started his
+# team's next game. Held out 2023-24/24-25/25-26: 4.2/4.6/4.8; next-2-week minutes error for role changers
+# 6.71/6.15/5.88 -> 5.38/5.00/4.90 (everyone 4.69/4.62/4.61 -> 4.48/4.44/4.46). All three seasons: 4.53.
+# (Tried first: minutes vacated by injured teammates. Spread over the whole bench it moved anyone by ~0, no gain.)
+OPP_MIN_PER_START = 4.5
+
+
+def in_season(prior, games, today, K, tau, Km, tau_m, Kh, new_mpg):
+    """Rest-of-season per-game projection: the preseason `prior` updated with this season's `games` before `today`.
+    Per-minute rates: prior rate counted as K[c] minutes of play, plus every game's stats weighted by
+    exp(-days ago / tau[c]); a hot week moves a stat only as far as the backtest says it predicts.
+    Minutes: prior MPG counted as Km games, plus games weighted by exp(-days ago / tau_m).
+    Availability: prior health counted as Kh team games, plus share of his team's games he played.
+    prior: id, MPG, health, COUNT per game. games: id, day, team_id, MPG (that night's minutes), COUNT.
+    Players with no prior (call-ups, undrafted rookies) start from new_mpg and the bench-player league rate."""
+    g = games[games.day < today].astype({c: float for c in COUNT + ["MPG", "day"]})  # empty log reads as text
+    p = prior.set_index("id")
+    ids = p.index.union(g.id.unique())
+    p = p.reindex(ids)
+    bench = p[p.MPG < 20]
+    bench_rate = bench[COUNT].sum() / bench.MPG.sum()
+    rate0 = p[COUNT].div(p.MPG, axis=0)
+    new = rate0.PTS.isna()
+    rate0.loc[new] = bench_rate.values
+    mpg0 = p.MPG.fillna(new_mpg)
+    out = pd.DataFrame(index=ids)
+    ago = today - g.day
+    for c in COUNT:
+        w = np.exp(-ago / tau[c])
+        num = (g[c] * w).groupby(g.id).sum().reindex(ids).fillna(0)
+        den = (g.MPG * w).groupby(g.id).sum().reindex(ids).fillna(0)
+        out[c] = (K[c] * rate0[c] + num) / (K[c] + den)  # per-minute rate for now
+    w = np.exp(-ago / tau_m)
+    num = (g.MPG * w).groupby(g.id).sum().reindex(ids).fillna(0)
+    den = w.groupby(g.id).sum().reindex(ids).fillna(0)
+    out["MPG"] = (Km * mpg0 + num) / (Km + den)
+    out[COUNT] = out[COUNT].mul(out.MPG, axis=0)
+    # availability: games played / his current team's games so far (a traded player: since joining)
+    last = g.sort_values("day").groupby("id").team_id.last()
+    traded = g.groupby("id").team_id.nunique() > 1
+    since = g[g.team_id == g.id.map(last)].groupby("id").day.min().where(traded, 0)
+    team_days = g.drop_duplicates(["team_id", "day"])[["team_id", "day"]]
+    gp = g[g.team_id == g.id.map(last)].groupby("id").size().reindex(ids).fillna(0)
+    team_gp = pd.Series({i: ((team_days.team_id == t) & (team_days.day >= since[i])).sum()
+                         for i, t in last.items()}).reindex(ids).fillna(0)
+    h0 = p.health.fillna(ROOKIE_AVAIL * AVAIL_SCALE)
+    out["health"] = (Kh * h0 + gp) / (Kh + team_gp)
+    out["gp_so_far"] = g.groupby("id").size().reindex(ids).fillna(0)
+    out = out.astype(float)  # an empty game log (before opening night) leaves object columns
+    out["FG%"], out["FT%"] = out.FGM / out.FGA, out.FTM / out.FTA
+    return out.reset_index(names="id")
+
+
+def promotion(games, today, starter_now, tau_m):
+    """Starting now (1/0) minus his recent share of starts, weighted like the minutes blend: + = bench player
+    moving into the lineup (injury ahead of him, trade, coach's call), - = starter moving to the bench.
+    Times OPP_MIN_PER_START = extra (or lost) MPG expected over the next 2 weeks."""
+    g = games[games.day < today].astype({"day": float, "GS": float})
+    w = np.exp(-(today - g.day) / tau_m)
+    recent = (g.GS * w).groupby(g.id).sum() / w.groupby(g.id).sum()
+    return (starter_now.reindex(recent.index).fillna(0) - recent).rename("promo")
+
+
 def _games_left(ids, injuries, schedule, players, today):
     """Games each player can play this season: 82, minus team games already played, minus games
     before their injury return date. (ESPN's schedule omits unscheduled NBA Cup games, so we

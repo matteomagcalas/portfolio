@@ -25,12 +25,22 @@ def data():
     return espn.load()
 
 
+def season_day(d):
+    """ESPN scoring period for today: 1 = opening night (the schedule's first date)."""
+    opener = pd.to_datetime(d["schedule"].date).min()
+    return (pd.Timestamp.now(tz="America/New_York").tz_localize(None).normalize() - opener).days + 1
+
+
 @st.cache_data(show_spinner=False)
 def board(cats, pool_size, updated, code):  # code: model/espn version, so a push recomputes the board
     d = data()
-    starter = d["depth"][d["depth"].slot == 0].drop_duplicates("id").set_index("id").slot.eq(0).astype(float)
-    proj = model.project_by_role(d["stats"], espn.SEASON, d["players"].set_index("id").team_id, starter, d["players"],
-                                 injuries=d["injuries"], schedule=d["schedule"])
+    # Rest of season: the preseason projection (frozen the night before tip-off) updated with every game
+    # played so far, as much as the backtest says games should count (model.in_season). Before opening
+    # night there are no games and this is just the preseason projection.
+    pre, games = d["preseason"], d["games"]
+    today = season_day(d)
+    proj = model.in_season(pre.assign(health=pre.health / model.AVAIL_SCALE), games, today, **model.IN_SEASON)
+    proj["GP"] = proj.health * model._games_left(proj.id, d["injuries"], d["schedule"], d["players"], None).values
     # Who's on the board: ESPN projects him, Yahoo leagues draft him, or he's on a roster with a real NBA sample
     # last season (30+ games, 500+ minutes). Keeps out 10-game G League call-ups, whose stints at 30 MPG
     # would otherwise project as full-season starters.
@@ -39,8 +49,17 @@ def board(cats, pool_size, updated, code):  # code: model/espn version, so a pus
     sample = last.id[(last.GP >= 30) & (last.GP * last.MPG >= 500)]
     rostered = pl.id[pl.team_id > 0]
     keep = (set(s.id[(s.source == "espn") & (s.season == espn.SEASON) & (s.MPG > 0)]) | set(pl.id[pl.adp.notna()])
-            | (set(sample) & set(rostered)))
+            | (set(sample) & set(rostered)) | set(games.id))  # plus anyone who has played this season
     proj = proj[proj.id.isin(keep)]
+    pre_rank = model.value(pre[pre.id.isin(keep)], list(cats), pool_size).id.reset_index(drop=True)
+    pre_rank = pd.Series(pre_rank.index + 1, index=pre_rank.values)
+    # Opportunity: bench player now in the starting lineup (or a starter now benched). Starter = first healthy name at
+    # each spot on ESPN's depth chart, so the next man up counts as soon as a starter is ruled out.
+    out_now = set(d["injuries"].id[d["injuries"].status == "Out"])
+    dc = d["depth"][~d["depth"].id.isin(out_now)].sort_values("slot")
+    starter_now = pd.Series(1.0, index=dc.groupby(["team_id", "pos"]).id.first().unique())
+    promo = model.promotion(games, today, starter_now, model.IN_SEASON["tau_m"])
+    proj["opp_min"] = (proj.id.map(promo).fillna(0) * model.OPP_MIN_PER_START).where(~proj.id.isin(out_now), 0)
     v = model.value(proj, list(cats), pool_size)
     inj = d["injuries"].drop_duplicates("id").set_index("id")
     v = v.merge(d["players"], on="id", how="left")
@@ -53,6 +72,8 @@ def board(cats, pool_size, updated, code):  # code: model/espn version, so a pus
                *[f"z_{c}" for c in cats]]] = None
     v["Rank"] = range(1, len(v) + 1)
     v["ADPval"] = v.adp - v.Rank  # + = we rank them ahead of the market (a steal)
+    v["PreRank"] = v.id.map(pre_rank)
+    v["RankChg"] = v.PreRank - v.Rank  # + = climbed since preseason
     primary = v.primary.fillna(v.pos.str.split("/").str[0]).map({"PG": "G", "SG": "G", "SF": "F", "PF": "F", "C": "C"}).fillna("")
     v["PosRank"] = primary + (v.groupby(primary).cumcount() + 1).astype(str)
     v["Photo"] = v.id.map(lambda i: f"{ESPN_IMG}/i/headshots/nba/players/full/{i}.png&w=96&h=70")
@@ -92,6 +113,8 @@ def board_style(df, z, cats):
     styles = pd.DataFrame("", index=df.index, columns=df.columns)
     if "ADPval" in df:
         styles["Rank"] = styles["ADPval"] = (df.ADPval / 30).map(shade)  # full color at 30+ spots
+    if "RankChg" in df:
+        styles["Rank"] = styles["RankChg"] = (df.RankChg / 30).map(shade)
     for c in cats:
         if c in df:
             styles[c] = (z.loc[df.index, f"z_{c}"] / 2.5).map(shade)  # full color at +/-2.5 sd
@@ -158,7 +181,7 @@ with st.sidebar:
     st.divider()
     d = data()
     st.caption(f"ESPN data updated {pd.Timestamp(d['updated']).tz_convert('America/New_York'):%b %d, %I:%M %p} ET. "
-               "Refreshes itself about every 12 hours.")
+               "Refreshes itself about every 6 hours.")
     if st.button("Refresh now"):
         espn.refresh(force=True)
         st.cache_data.clear()
@@ -189,6 +212,7 @@ if synced:  # Yahoo is the source of truth: rosters already include every waiver
 starred = {int(x) for x in qp.get("star", "").split(",") if x}
 v["Mine"], v["Taken"] = v.index.isin(mine), v.index.isin(taken)
 v["Star"] = v.index.map(lambda i: "⭐" if i in starred else "☆")
+in_season = len(d["games"]) > 0  # opening night has happened
 
 
 def toggle_star(key):
@@ -212,13 +236,20 @@ FMT.update({"FG%": st.column_config.NumberColumn(format="%.3f"), "FT%": st.colum
                                                  "Blank = not being drafted in Yahoo leagues"),
             "age": st.column_config.NumberColumn("Age", format="%.0f"),
             "value": st.column_config.NumberColumn("Value", format="%.2f",
-                                                   help="Season value: z-scores x projected games. Never negative: about 0.7 = "
+                                                   help="Rest-of-season value: z-scores x projected games left. Never negative: about 0.7 = "
                                                         "replacement level, near 0 = won't play"),
             "Injury": st.column_config.TextColumn(width="small", help="O = out, DTD = day-to-day; date = expected return"),
             "Rank": st.column_config.NumberColumn(help="Green = we rank them ahead of ADP (a steal). Red = behind ADP."),
             "ADPval": st.column_config.NumberColumn("ADP Val", format="%+.1f",
                                                     help="ADP minus our rank. Green/+ = we rank them ahead of ADP "
                                                          "(a steal). Red/- = behind ADP."),
+            "RankChg": st.column_config.NumberColumn("Rk Chg", format="%+.0f",
+                                                     help="Preseason rank minus rank now. Green/+ = climbed since opening night"),
+            "PreRank": st.column_config.NumberColumn("Pre Rk", help="Rank in the preseason projection, frozen before opening night"),
+            "opp_min": st.column_config.NumberColumn("+Min (role)", format="%+.1f",
+                                                     help="Minutes per game gained (or lost) over the next 2 weeks from moving "
+                                                          "into (out of) the starting lineup, beyond what his recent games show"),
+            "gp_so_far": st.column_config.NumberColumn("GP so far", format="%.0f"),
             "PosRank": st.column_config.TextColumn("Pos Rk", help="Rank among players at their primary position group: G, F or C"),
             "name": "Player", "team": "Team", "pos": "Pos",
             "Photo": st.column_config.ImageColumn("", width=48),
@@ -231,13 +262,17 @@ steals = avail[avail.ADPval.notna()]
 m1, m2, m3, m4 = st.columns(4)
 m1.metric("Best available", avail.iloc[0]["name"] if len(avail) else "-",
           f"{avail.iloc[0].value:.2f} value" if len(avail) else None, delta_color="off", border=True)
-if len(steals):
+risers = avail[avail.Rank <= teams * roster * 1.5]  # rosterable range: a jump from 400th to 250th means little
+if in_season and len(risers):
+    s = risers.loc[risers.RankChg.idxmax()]
+    m2.metric("Biggest riser available", s["name"], f"up {s.RankChg:.0f} spots since preseason", border=True)
+elif len(steals):
     s = steals.loc[steals.ADPval.idxmax()]
     m2.metric("Biggest steal vs ADP", s["name"], f"ranked {s.ADPval:.0f} spots ahead of ADP", border=True)
 else:
     m2.metric("Biggest steal vs ADP", "-", border=True)
 m3.metric("Your picks", len(mine), f"{len(taken)} taken by others", delta_color="off", border=True)
-m4.metric("ESPN data", f"{ago:.0f}h ago" if ago >= 1 else "just now", "refreshes about every 12h",
+m4.metric("ESPN data", f"{ago:.0f}h ago" if ago >= 1 else "just now", "refreshes about every 6h",
           delta_color="off", border=True)
 tab_draft, tab_team, tab_star, tab_waiver = st.tabs([":material/sports_basketball: Available Players",
                                                      ":material/groups: My team", ":material/star: Starred",
@@ -266,13 +301,16 @@ with tab_draft:
         view = view[pos_match(view, positions)]
     if nba_teams:
         view = view[view.team.isin(nba_teams)]
-    view = view.sort_values(["adp", "Rank"], na_position="last")  # market order; click a header to re-sort
+    # preseason: market order; in season: our rest-of-season rank. Click a header to re-sort.
+    view = view.sort_values("Rank") if in_season else view.sort_values(["adp", "Rank"], na_position="last")
     st.caption(("Mine/Taken come from your Yahoo league (re-synced every 10 minutes). " if synced else
                 "Tick **Mine** for your picks and **Taken** for everyone else's. ") +
                f"{len(mine)} mine, {len(taken)} taken by others. Category colors: green = helps you vs. the "
                f"draftable pool, red = hurts (FG%/FT% weighted by attempts, high TO is red).")
-    cols = ["Star", "Mine", "Taken", "adp", "Rank", "ADPval", "PosRank", "name", "team", "pos", "age", "value",
-            *STAT_COLS, "Injury"]
+    cols = (["Star", "Mine", "Taken", "Rank", "RankChg", "PreRank", "PosRank", "name", "team", "pos", "age", "value",
+             "gp_so_far", *STAT_COLS, "Injury"] if in_season else
+            ["Star", "Mine", "Taken", "adp", "Rank", "ADPval", "PosRank", "name", "team", "pos", "age", "value",
+             *STAT_COLS, "Injury"])
     # The key follows the rows shown (not the picks), so a tick keeps the same editor and your scroll spot,
     # and edits never replay onto different rows after a filter change.
     st.session_state.star_draft_ids = list(view.index[:400])
@@ -389,9 +427,36 @@ with tab_waiver:
             fa = fa[pos_match(fa, pos_filter)]
         if team_filter:
             fa = fa[fa.team.isin(team_filter)]
-        st.dataframe(fa[["Photo", "name", "Logo", "team", "pos", "Upgrade", "value", *[f"Δ{c}" for c in cats], "Injury"]]
+        st.dataframe(fa[["Photo", "name", "Logo", "team", "pos", "Upgrade", "value", *(["RankChg", "opp_min"] if in_season else []),
+                         *[f"Δ{c}" for c in cats], "Injury"]]
                      .head(50).style.apply(lambda col: col.map(injury_badge), subset=["Injury"]),
                      hide_index=True, column_config=FMT)
+        if in_season:
+            st.subheader("Minutes opening up: next 2 weeks")
+            st.caption("Free agents moving into the starting lineup (ESPN depth chart, injured players skipped) who mostly came "
+                       "off the bench lately. Backtest: these players average about 4 more minutes over the next 2 weeks than "
+                       "their recent games suggest. Valued over their games in the next 14 days; often short-term streamers.")
+            today = pd.Timestamp.now(tz="America/New_York").tz_localize(None).normalize()
+            nxt = v[~v.Mine & ~v.Taken & (v.opp_min >= 2) & (v.MPG > 0)].reset_index()  # 2+ = at least half a start-share
+            if nxt.empty:
+                st.info("No free agent is picking up meaningful minutes from injuries right now.")
+            else:
+                boost = (nxt.MPG + nxt.opp_min) / nxt.MPG
+                nxt[model.COUNT] = nxt[model.COUNT].mul(boost, axis=0)
+                nxt["MPG"] = nxt.MPG + nxt.opp_min
+                nxt["wk2"] = model.games_between(nxt.id, d["injuries"], d["schedule"], d["players"], today,
+                                                 today + pd.Timedelta(days=13)).values
+                nxt["GP"] = nxt.health * nxt.wk2
+                allv = model.value(pd.concat([v[~v.index.isin(nxt.id)].reset_index(), nxt]), list(cats),
+                                   int(teams * roster)).set_index("id")
+                nxt = allv.loc[nxt.id]
+                nxt["pg_rank"] = nxt.value_pg.map(lambda x: int((allv.value_pg > x).sum()) + 1)
+                nxt = nxt.sort_values("value", ascending=False).head(15)
+                st.dataframe(nxt[["name", "team", "pos", "opp_min", "MPG", "wk2", "pg_rank", *[c for c in STAT_COLS if c not in ("GP", "MPG")], "Injury"]],
+                             hide_index=True, column_config={**FMT, "wk2": st.column_config.NumberColumn("Games (2 wk)"),
+                                                             "MPG": st.column_config.NumberColumn("MPG (boosted)", format="%.1f"),
+                                                             "pg_rank": st.column_config.NumberColumn("Per-game rank", help="Where his per-game "
+                                                                 "line while starting would rank among all players")})
     if moves is not None and len(moves):
         with st.expander(f"Recent league moves ({len(moves)})"):
             st.dataframe(moves.assign(time=moves.time.dt.strftime("%b %d %I:%M %p")), hide_index=True)
