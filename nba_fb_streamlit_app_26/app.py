@@ -61,6 +61,11 @@ def board(cats, pool_size, updated, code):  # code: model/espn version, so a pus
     return v.set_index("id")
 
 
+@st.cache_data(ttl=600, show_spinner="Syncing your Yahoo league...")
+def league(league_id):
+    return espn.yahoo_league(league_id)
+
+
 POSITIONS = ["PG", "SG", "G", "SF", "PF", "F", "C"]
 
 
@@ -125,8 +130,26 @@ def fill_lineup(team):
 # ---- sidebar: league setup ----
 with st.sidebar:
     st.header("League")
+    # Yahoo league id and your team live in the URL: bookmark it and a reload or lost tab picks up where you were.
+    league_id = st.text_input("Yahoo league ID", st.query_params.get("league", ""),
+                              help="The number in your league URL: basketball.fantasysports.yahoo.com/nba/<ID>. "
+                                   "The league must be public. Leave blank to tick Mine/Taken by hand.").strip()
+    rosters = moves = None
+    if league_id != st.query_params.get("league", ""):
+        st.query_params["league"] = league_id
+    if league_id:
+        try:
+            rosters, moves = league(league_id)
+        except Exception as e:
+            st.error(f"Couldn't read Yahoo league {league_id} (is it public?): {e}")
+    if rosters is not None and len(rosters):
+        names = rosters.drop_duplicates("team_id").set_index("team_id").team
+        my_team = st.selectbox("Your team", names.index, format_func=names.get,
+                               index=list(names.index).index(int(st.query_params["team"]))
+                               if st.query_params.get("team", "").isdigit() and int(st.query_params["team"]) in names.index else 0)
+        st.query_params["team"] = str(my_team)
     fmt = st.selectbox("Format", list(model.CATS))
-    teams = st.number_input("Teams", 4, 30, 10)
+    teams = st.number_input("Teams", 4, 30, rosters.team_id.nunique() if rosters is not None and len(rosters) else 10)
     roster = st.number_input("Roster spots per team", 5, 20, 13)
     cats = st.multiselect("Categories (remove one to punt it)", model.CATS[fmt], default=model.CATS[fmt])
     st.divider()
@@ -149,6 +172,16 @@ v = board(tuple(cats), int(teams * roster), d["updated"], CODE)
 qp = st.query_params
 mine = {int(x) for x in qp.get("mine", "").split(",") if x}
 taken = {int(x) for x in qp.get("taken", "").split(",") if x}
+synced = rosters is not None and len(rosters) > 0
+if synced:  # Yahoo is the source of truth: rosters already include every waiver and trade
+    ids = d["players"].assign(key=d["players"].name.map(espn._norm)).drop_duplicates("key").set_index("key").id
+    rosters["id"] = rosters.key.map(ids)
+    rostered = rosters[rosters.id.isin(v.index)]
+    mine = set(rostered.id[rostered.team_id == my_team].astype(int))
+    taken = set(rostered.id[rostered.team_id != my_team].astype(int))
+    unmatched = rosters.name[rosters.id.isna()]
+    if len(unmatched):
+        st.sidebar.caption("Not on the board (can't project): " + ", ".join(unmatched))
 starred = {int(x) for x in qp.get("star", "").split(",") if x}
 v["Mine"], v["Taken"] = v.index.isin(mine), v.index.isin(taken)
 v["Star"] = v.index.map(lambda i: "⭐" if i in starred else "☆")
@@ -212,7 +245,7 @@ with tab_draft:
     positions = c2.multiselect("Position", POSITIONS)
     nba_teams = c3.multiselect("Team", NBA_TEAMS)
     hide = c4.toggle("Hide drafted", value=False)
-    with c4.popover("Reset draft", disabled=not (mine or taken)):
+    with c4.popover("Reset draft", disabled=synced or not (mine or taken)):
         st.write(f"Clear all {len(mine)} Mine and {len(taken)} Taken picks?")
         if st.button("Yes, reset", type="primary"):
             for k in ("mine", "taken"):  # picks live only in the URL; stars stay
@@ -230,7 +263,8 @@ with tab_draft:
     if nba_teams:
         view = view[view.team.isin(nba_teams)]
     view = view.sort_values(["adp", "Rank"], na_position="last")  # market order; click a header to re-sort
-    st.caption(f"Tick **Mine** for your picks and **Taken** for everyone else's. "
+    st.caption(("Mine/Taken come from your Yahoo league (re-synced every 10 minutes). " if synced else
+                "Tick **Mine** for your picks and **Taken** for everyone else's. ") +
                f"{len(mine)} mine, {len(taken)} taken by others. Category colors: green = helps you vs. the "
                f"draftable pool, red = hurts (FG%/FT% weighted by attempts, high TO is red).")
     cols = ["Star", "Mine", "Taken", "adp", "Rank", "ADPval", "PosRank", "name", "team", "pos", "age", "value",
@@ -239,7 +273,7 @@ with tab_draft:
     # and edits never replay onto different rows after a filter change.
     st.session_state.star_draft_ids = list(view.index[:400])
     edited = st.data_editor(view[cols].head(400).style.apply(board_style, z=v, cats=cats, axis=None), hide_index=True,
-                            height=650, column_config={**FMT, "Star": star_col("star_draft")}, disabled=[c for c in cols if c not in ("Star", "Mine", "Taken")],
+                            height=650, column_config={**FMT, "Star": star_col("star_draft")}, disabled=[c for c in cols if c not in (("Star",) if synced else ("Star", "Mine", "Taken"))],
                             key=f"ed-{hash((tuple(view.index[:400]), st.session_state.get('resets', 0)))}")
     if nba_teams and len(view):
         rows = []
@@ -256,7 +290,7 @@ with tab_draft:
     shown = set(view.index[:400])
     new_mine = (mine - shown) | set(view.index[:400][edited.Mine.values])
     new_taken = (taken - shown) | set(view.index[:400][edited.Taken.values])
-    if new_mine != mine or new_taken != taken:
+    if not synced and (new_mine != mine or new_taken != taken):
         qp["mine"] = ",".join(map(str, sorted(new_mine)))
         qp["taken"] = ",".join(map(str, sorted(new_taken)))
         st.rerun()
@@ -347,3 +381,6 @@ with tab_waiver:
         st.dataframe(fa[["Photo", "name", "Logo", "team", "pos", "Upgrade", "value", *[f"Δ{c}" for c in cats], "Injury"]]
                      .head(50).style.apply(lambda col: col.map(injury_badge), subset=["Injury"]),
                      hide_index=True, column_config=FMT)
+    if moves is not None and len(moves):
+        with st.expander(f"Recent league moves ({len(moves)})"):
+            st.dataframe(moves.assign(time=moves.time.dt.strftime("%b %d %I:%M %p")), hide_index=True)

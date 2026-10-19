@@ -77,6 +77,40 @@ def _yahoo_adp(max_players=400):
     return pd.DataFrame(rows).drop_duplicates("key")
 
 
+def _flat(parts):
+    """Yahoo splits one record over a list of one-key dicts: merge them."""
+    return {k: v for p in parts if isinstance(p, dict) for k, v in p.items()}
+
+
+def yahoo_league(league_id):
+    """Live rosters and recent moves of a public Yahoo league (no login needed).
+    Returns (rosters: team_id, team, key, name; moves: time, type, name, from, to); key = normalized name."""
+    url = f"https://pub-api-rw.fantasysports.yahoo.com/fantasy/v2/league/nba.l.{league_id}/{{}}?format=json"
+    h = {"User-Agent": "Mozilla/5.0"}
+    teams = _get(url.format("teams/roster"), headers=h)["fantasy_content"]["league"][1]["teams"]
+    rosters = []
+    for k in range(teams["count"]):
+        t = teams[str(k)]["team"]
+        info, ps = _flat(t[0]), t[1]["roster"]["0"]["players"]
+        for j in range(ps.get("count", 0) if isinstance(ps, dict) else 0):
+            name = _flat(ps[str(j)]["player"][0])["name"]["full"]
+            rosters.append({"team_id": int(info["team_id"]), "team": info["name"], "key": _norm(name), "name": name})
+    tx = _get(url.format("transactions"), headers=h)["fantasy_content"]["league"][1]["transactions"]
+    moves = []
+    for k in range(tx.get("count", 0) if isinstance(tx, dict) else 0):
+        t = tx[str(k)]["transaction"]
+        ps = t[1].get("players", {}) if len(t) > 1 else {}
+        for j in range(ps.get("count", 0)):
+            p = ps[str(j)]["player"]
+            move = p[1]["transaction_data"]
+            move = move[0] if isinstance(move, list) else move
+            moves.append({"time": pd.Timestamp(int(t[0]["timestamp"]), unit="s", tz="UTC").tz_convert("America/New_York"),
+                          "type": move["type"], "name": _flat(p[0])["name"]["full"],
+                          "from": move.get("source_team_name", move.get("source_type", "")),
+                          "to": move.get("destination_team_name", move.get("destination_type", ""))})
+    return pd.DataFrame(rosters), pd.DataFrame(moves, columns=["time", "type", "name", "from", "to"])
+
+
 def _players(season):
     return _get(FANTASY.format(season), headers={"X-Fantasy-Filter": FILTER})["players"]
 
