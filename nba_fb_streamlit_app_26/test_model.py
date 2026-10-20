@@ -46,4 +46,11 @@ pl = pd.DataFrame({"id": [7, 8], "team_id": 1})
 wk = model.week(proj, wk_games, sched, inj, pl, "2026-10-19", "2026-10-25", opener)
 assert abs(wk.loc[7, "PTS"] - (15 + 2 * model.P_PLAY * 10)) < 1e-9, wk.loc[7, "PTS"]
 assert wk.loc[8, "PTS"] == 0 and wk.loc[8, "g_left"] == 0, wk.loc[8]
+assert wk.loc[7, "g_played"] == 1 and wk.loc[7, "g_left"] == 2, wk.loc[7]  # shown as whole games
+# refresh: pulled 9 pm, it's 8 am next day -> stale (last night's games); pulled 4 am, now 8 am -> fresh
+import espn
+et = lambda t: pd.Timestamp(t, tz="America/New_York")
+assert espn.stale(et("2026-10-21 21:00").timestamp(), et("2026-10-22 08:00"))
+assert not espn.stale(et("2026-10-22 04:00").timestamp(), et("2026-10-22 08:00"))
+assert espn.stale(et("2026-10-22 04:00").timestamp(), et("2026-10-22 11:00"))  # 6h cap
 print("ok")

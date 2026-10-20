@@ -141,10 +141,20 @@ def _players(season):
     return _get(FANTASY.format(season), headers={"X-Fantasy-Filter": FILTER})["players"]
 
 
+def stale(mtime, now=None):
+    """Older than MAX_AGE_HOURS, or pulled before 3 am ET today: last night's games (done by ~1 am ET) aren't in
+    yet. So the first visit each morning gets every box score from the night before."""
+    now = pd.Timestamp(now or pd.Timestamp.now(tz="America/New_York"))
+    cutoff = now.normalize() + pd.Timedelta(hours=3)
+    if now < cutoff:
+        cutoff -= pd.Timedelta(days=1)
+    return now - pd.Timestamp(mtime, unit="s", tz="UTC") > pd.Timedelta(hours=MAX_AGE_HOURS) or         pd.Timestamp(mtime, unit="s", tz="UTC") < cutoff
+
+
 def refresh(force=False):
     DATA.mkdir(exist_ok=True)
     stamp = DATA / "updated.txt"
-    if not force and stamp.exists() and (DATA / f"games_{SEASON}.csv").exists() and time.time() - stamp.stat().st_mtime < MAX_AGE_HOURS * 3600:
+    if not force and stamp.exists() and (DATA / f"games_{SEASON}.csv").exists() and not stale(stamp.stat().st_mtime):
         return
 
     history = DATA / "history.csv"  # finished seasons never change, pull once

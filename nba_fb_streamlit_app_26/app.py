@@ -20,7 +20,7 @@ CODE = hashlib.md5(Path(model.__file__).read_bytes() + Path(espn.__file__).read_
 ESPN_IMG = "https://a.espncdn.com/combiner/i?img="  # resizes ESPN headshots/logos server side
 
 
-@st.cache_data(ttl=3600, show_spinner="Pulling latest ESPN data (about a minute the first time)...")
+@st.cache_data(ttl=900, show_spinner="Pulling latest ESPN data (about a minute the first time)...")
 def data(code):  # code: espn.py/model.py version, so a push never serves data loaded by older code
     espn.refresh()
     return espn.load()
@@ -48,7 +48,7 @@ def week_board(cats, pool_size, updated, code):
     tot = wk.assign(GP=82.0, MPG=wk.MPG.fillna(0) * wk.GP).reset_index(names="id")
     val = model.value(tot, list(cats), pool_size).set_index("id")
     out = wk.join(val[[f"z_{c}" for c in cats] + ["value"]])
-    out["Rank"] = out.value.rank(ascending=False, method="first")
+    out["Rank"] = out.value.rank(ascending=False, method="first").astype(int)
     return out
 
 
@@ -147,6 +147,19 @@ def board_style(df, z, cats):
     if "Injury" in df:
         styles["Injury"] = df.Injury.map(injury_badge)
     return styles
+
+
+WHOLE = {"Rank", "PreRank", "adp", "age", "GP", "gp_so_far", "g_played", "g_left"}
+
+
+def styled(df, z, cats):
+    """Board coloring plus number formats. A Styler ignores column_config formats (pandas would show 6 decimals),
+    so formats live here: whole numbers for ranks/games, 3 decimals for FG%/FT%, signed changes, 2 decimals otherwise."""
+    fmt = {}
+    for c in df.select_dtypes("number").columns:
+        fmt[c] = ("{:.0f}" if c in WHOLE else "{:.3f}" if c in ("FG%", "FT%") else
+                  "{:+.0f}" if c in ("RankChg", "ADPval") else "{:.2f}")
+    return df.style.apply(board_style, z=z, cats=cats, axis=None).format(fmt, na_rep="")
 
 
 def injury_badge(s):
@@ -280,8 +293,9 @@ FMT.update({"FG%": st.column_config.NumberColumn(format="%.3f"), "FT%": st.colum
                                                           "into (out of) the starting lineup, beyond what his recent games show"),
             "gp_so_far": st.column_config.NumberColumn("GP so far", format="%.0f"),
             "g_played": st.column_config.NumberColumn("Played", format="%.0f", help="Games played this week"),
-            "g_left": st.column_config.NumberColumn("Left", format="%.1f",
-                                                    help="Expected games left this week: healthy team games x play rate"),
+            "g_left": st.column_config.NumberColumn("Left", format="%.0f",
+                                                    help="Games left this week he's healthy for (injury report). Totals count "
+                                                         "each as 0.89 of a game, the share rotation players actually play"),
             "PosRank": st.column_config.TextColumn("Pos Rk", help="Rank among players at their primary position group: G, F or C"),
             "name": "Player", "team": "Team", "pos": "Pos",
             "Photo": st.column_config.ImageColumn("", width=48),
@@ -320,7 +334,7 @@ if weekly:
     vv[wcols] = wk[wcols].reindex(vv.index)
     ws, we = this_week()
     st.caption(f"Week of {ws:%b %d} - {we:%b %d}: totals = played so far + expected remaining games "
-               f"(each healthy game counts {model.P_PLAY:.0%}, the share rotation players actually play).")
+               f"(each healthy game counts {model.P_PLAY:.0%}, the share rotation players actually play). Weeks run Monday-Sunday.")
 
 tab_draft, tab_team, tab_star, tab_waiver = st.tabs([":material/sports_basketball: Available Players",
                                                      ":material/groups: My team", ":material/star: Starred",
@@ -366,7 +380,7 @@ with tab_draft:
     # The key follows the rows shown (not the picks), so a tick keeps the same editor and your scroll spot,
     # and edits never replay onto different rows after a filter change.
     st.session_state.star_draft_ids = list(view.index[:400])
-    edited = st.data_editor(view[cols].head(400).style.apply(board_style, z=vv, cats=cats, axis=None), hide_index=True,
+    edited = st.data_editor(styled(view[cols].head(400), vv, cats), hide_index=True,
                             height=650, column_config={**FMT, "Star": star_col("star_draft")}, disabled=[c for c in cols if c not in (("Star",) if synced else ("Star", "Mine", "Taken"))],
                             key=f"ed-{hash((tuple(view.index[:400]), st.session_state.get('resets', 0)))}")
     if nba_teams and len(view):
@@ -400,7 +414,7 @@ with tab_star:
                 del st.query_params["star"]
                 st.rerun()
         st.session_state.star_tab_ids = list(fav.index)
-        st.dataframe(fav[[c for c in cols if c not in ("Mine", "Taken")]].style.apply(board_style, z=v, cats=cats, axis=None),
+        st.dataframe(styled(fav[[c for c in cols if c not in ("Mine", "Taken")]], vv, cats),
                      hide_index=True, column_config={**FMT, "Star": star_col("star_tab")})
 
 with tab_team:
@@ -418,7 +432,7 @@ with tab_team:
         tcols = (["Rank", "Photo", "name", "Logo", "team", "pos", "value", "g_played", "g_left", "MPG",
                   *[c for c in STAT_COLS if c not in ("GP", "MPG")], "Injury"] if weekly else
                  ["Rank", "PosRank", "Photo", "name", "Logo", "team", "pos", "value", *STAT_COLS, "Injury"])
-        st.dataframe(team.sort_values("Rank")[tcols].style.apply(board_style, z=vv, cats=cats, axis=None),
+        st.dataframe(styled(team.sort_values("Rank")[tcols], vv, cats),
                      hide_index=True, column_config=FMT)
         if weekly:
             act = team[~team.index.isin(il)]  # IL slots don't score

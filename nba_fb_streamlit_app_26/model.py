@@ -365,12 +365,13 @@ def week(proj, games, schedule, injuries, players, start, end, opener):
     ret = pd.to_datetime(inj.return_date).map(lambda r: day(r) if pd.notna(r) else None)
     done = inj.season_out.fillna(False).astype(bool) | ((inj.status == "Out") & ret.isna())
     left = pd.Series([0 if dn else int(((sched.team_id == t) & (sched.day >= (r if pd.notna(r) else 0))).sum())
-                      for t, r, dn in zip(team, ret, done)], index=p.index) * P_PLAY
-    out = actual[COUNT].add(p[COUNT].fillna(0).mul(left, axis=0))
-    out["g_played"] = played.groupby("id").size().reindex(p.index).fillna(0)
+                      for t, r, dn in zip(team, ret, done)], index=p.index)  # healthy games left: shown
+    exp = left * P_PLAY  # expected games played: what the totals use
+    out = actual[COUNT].add(p[COUNT].fillna(0).mul(exp, axis=0))
+    out["g_played"] = played.groupby("id").size().reindex(p.index).fillna(0).astype(int)
     out["g_left"] = left
-    out["GP"] = out.g_played + out.g_left
-    out["MPG"] = (actual.MPG + p.MPG.fillna(0) * left) / out.GP.where(out.GP > 0)
+    out["GP"] = out.g_played + exp
+    out["MPG"] = (actual.MPG + p.MPG.fillna(0) * exp) / out.GP.where(out.GP > 0)
     out["FG%"], out["FT%"] = out.FGM / out.FGA, out.FTM / out.FTA
     return out
 
