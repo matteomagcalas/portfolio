@@ -574,13 +574,16 @@ with tab_team:
             team_plays = set(d["schedule"].team_id[pd.to_datetime(d["schedule"].date) == day])
             rows = []
             started_ids = set(on.id)
-            status = lambda i: ("IL" if i in il else "plays" if i in playing else
-                                "injured" if v.team_id.get(i) in team_plays else "no game")
+            sched = d["schedule"]
+            opp = sched[pd.to_datetime(sched.date) == day].drop_duplicates("team_id").set_index("team_id").opp
+            # matchup (DAL = home vs Dallas, @UTA = at Utah); injured or IL players with a game say so; blank = no game
+            status = lambda i: ("IL" if i in il else opp.get(v.team_id.get(i), "") if i in playing else
+                                f"OUT ({opp.get(v.team_id.get(i), '')})" if v.team_id.get(i) in team_plays else "")
             # spots nobody with a game can fill keep your usual player (best value that fits), so the list keeps
             # its shape every day; only spots with a game today are green
             by_slot = {sl: list(on.id[on.slot == sl]) for sl in set(SLOTS)}
             rest = [i for i in team.sort_values("value", ascending=False).index if i not in started_ids and i not in il
-                    and status(i) != "plays"]
+                    and i not in playing]
             rows, placed = [], set()
             for slot in SLOTS:  # one row per active slot, in Yahoo's order (the 3 Util spots take turns)
                 pid = by_slot[slot].pop(0) if by_slot[slot] else next((i for i in rest if fits(v.pos.get(i), slot)), None)
@@ -588,26 +591,26 @@ with tab_team:
                     rest.remove(pid)
                 placed.add(pid)
                 st_ = status(pid) if pid else ""
-                rows.append({"Slot": slot, "Player": team.name.get(pid, "(empty)") if pid else "(empty)", "Today": st_,
-                             **{c: per.loc[pid, c] if st_ == "plays" else None for c in stat_cols}})
+                rows.append({"Slot": slot, "Player": team.name.get(pid, "(empty)") if pid else "(empty)", "Matchup": st_,
+                             **{c: per.loc[pid, c] if pid in playing else None for c in stat_cols}})
             for i in team.sort_values("value", ascending=False).index:  # bench: whoever's left, playing first
                 if i not in placed:
-                    rows.append({"Slot": "IL" if i in il else "BN", "Player": team.name[i], "Today": status(i),
-                                 **{c: per.loc[i, c] if status(i) == "plays" else None for c in stat_cols}})
+                    rows.append({"Slot": "IL" if i in il else "BN", "Player": team.name[i], "Matchup": status(i),
+                                 **{c: per.loc[i, c] if i in playing else None for c in stat_cols}})
             lineup = pd.DataFrame(rows)
             bn = lineup.Slot.isin(["BN", "IL"])
-            lineup = pd.concat([lineup[~bn], lineup[bn].sort_values("Today", key=lambda t: t.map(
-                {"plays": 0, "injured": 1, "no game": 2, "IL": 3}), kind="stable")])
+            rank = lambda t: t.map(lambda x: 3 if x == "IL" else 1 if x.startswith("OUT") else 2 if x == "" else 0)
+            lineup = pd.concat([lineup[~bn], lineup[bn].sort_values("Matchup", key=rank, kind="stable")])  # playing first
             n_open = len(SLOTS) - len(started_ids)
             st.caption(f"{day:%A}: {len(started_ids)} of your players {'plays and fills' if len(started_ids) == 1 else 'play and fill'} "
                        "the green spots (best first, by position). Stats are per-game projections." +
                        (f" {n_open} spot(s) have nobody playing: a streamer with a game this day would start there."
                         if n_open else ""))
-            green = lineup.Today.eq("plays") & ~lineup.Slot.isin(["BN", "IL"])
+            green = lineup.Player.map({team.name[i]: i in playing for i in team.index}).fillna(False) & ~lineup.Slot.isin(["BN", "IL"])
             st.dataframe(lineup.style.apply(lambda col: ["background-color: rgba(34,160,80,0.30)" if g else "" for g in green],
                                             subset=["Slot", "Player"])
-                         .apply(lambda col: ["color: #999" if t in ("no game", "injured", "IL") else "" for t in col],
-                                subset=["Today"])
+                         .apply(lambda col: ["color: #999" if t == "IL" or t.startswith("OUT") else "" for t in col],
+                                subset=["Matchup"])
                          .format({c: "{:.1f}" for c in stat_cols}, na_rep=""),
                          hide_index=True, height=35 * (len(lineup) + 1) + 3)
 

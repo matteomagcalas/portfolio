@@ -155,6 +155,10 @@ def stale(mtime, now=None):
     return now - pd.Timestamp(mtime, unit="s", tz="UTC") > pd.Timedelta(hours=MAX_AGE_HOURS) or         pd.Timestamp(mtime, unit="s", tz="UTC") < cutoff
 
 
+# ESPN team abbreviations that Yahoo writes differently (matchups are shown the way Yahoo shows them)
+YAHOO_ABBR = {"GS": "GSW", "NO": "NOP", "NY": "NYK", "SA": "SAS", "UTAH": "UTA", "WSH": "WAS"}
+
+
 def refresh(force=False):
     DATA.mkdir(exist_ok=True)
     stamp = DATA / "updated.txt"
@@ -186,7 +190,11 @@ def refresh(force=False):
         for g in _get(f"{SITE}/teams/{tid}/schedule", params={"season": SEASON, "seasontype": 2}).get("events", []):
             # ESPN gives UTC; a 10 pm ET tip is the next day in UTC. Fantasy days are US Eastern.
             et = pd.Timestamp(g["date"]).tz_convert("America/New_York")
-            games.append({"team_id": tid, "date": f"{et:%Y-%m-%d}"})
+            us = next((c for c in g["competitions"][0]["competitors"] if int(c["team"]["id"]) == tid), None)
+            them = next((c for c in g["competitions"][0]["competitors"] if int(c["team"]["id"]) != tid), None)
+            opp = YAHOO_ABBR.get(them["team"]["abbreviation"], them["team"]["abbreviation"]) if them else ""
+            games.append({"team_id": tid, "date": f"{et:%Y-%m-%d}",  # matchup as Yahoo shows it: DAL home, @UTA away
+                          "opp": opp if us is None or us["homeAway"] == "home" else f"@{opp}"})
     pd.DataFrame(games).to_csv(DATA / "schedule.csv", index=False)
     pd.DataFrame(depth, columns=["id", "team_id", "pos", "slot"]).to_csv(DATA / "depth.csv", index=False)
 
