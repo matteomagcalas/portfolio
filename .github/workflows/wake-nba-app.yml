@@ -1,0 +1,30 @@
+name: Wake NBA fantasy app
+# Every morning at 6 AM Central: open the app so it pulls last night's box scores before anyone visits.
+# GitHub cron is UTC and has no time zones: run at 11:00 and 12:00 UTC (6 AM CDT / 6 AM CST) and let
+# only the one that is 6 AM in Chicago continue. GitHub may start scheduled runs a few minutes late.
+on:
+  schedule:
+    - cron: "0 11 * * *"
+    - cron: "0 12 * * *"
+  workflow_dispatch:  # "Run workflow" button for a manual wake-up
+
+jobs:
+  wake:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Only at 6 AM Central
+        id: hour
+        run: echo "go=$([ "${{ github.event_name }}" = workflow_dispatch ] || [ "$(TZ=America/Chicago date +%H)" = 06 ] && echo yes || echo no)" >> "$GITHUB_OUTPUT"
+      - uses: actions/checkout@v4
+        if: steps.hour.outputs.go == 'yes'
+      - uses: actions/setup-python@v5
+        if: steps.hour.outputs.go == 'yes'
+        with:
+          python-version: "3.12"
+      - name: Open the app
+        if: steps.hour.outputs.go == 'yes'
+        run: |
+          pip install playwright
+          playwright install --with-deps chromium
+          python nba_fb_streamlit_app_26/wake.py
