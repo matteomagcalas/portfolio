@@ -573,27 +573,42 @@ with tab_team:
             playing = set(gl.id[(gl.date == day) & gl.id.isin(team.index)])
             team_plays = set(d["schedule"].team_id[pd.to_datetime(d["schedule"].date) == day])
             rows = []
-            by_slot = {sl: list(on.id[on.slot == sl]) for sl in set(SLOTS)}
-            for slot in SLOTS:  # one row per active slot, in Yahoo's order (the 3 Util spots take turns)
-                pid = by_slot[slot].pop(0) if by_slot[slot] else None
-                rows.append({"Slot": slot, "Player": team.name.get(pid, "(empty)") if pid else "(empty)",
-                             **{c: per.loc[pid, c] if pid else None for c in stat_cols}})
             started_ids = set(on.id)
-            order = ["BN (has a game)", "BN (injured)", "BN (no game)", "IL"]  # sitting with a game first
-            bench = []
-            for i in team.sort_values("value", ascending=False).index.difference(started_ids, sort=False):
-                note = ("IL" if i in il else "BN (has a game)" if i in playing else
-                        "BN (injured)" if v.team_id.get(i) in team_plays else "BN (no game)")
-                bench.append({"Slot": note, "Player": team.name[i],
-                              **{c: per.loc[i, c] if note == "BN (has a game)" else None for c in stat_cols}})
-            rows += sorted(bench, key=lambda r: order.index(r["Slot"]))
+            status = lambda i: ("IL" if i in il else "plays" if i in playing else
+                                "injured" if v.team_id.get(i) in team_plays else "no game")
+            # spots nobody with a game can fill keep your usual player (best value that fits), so the list keeps
+            # its shape every day; only spots with a game today are green
+            by_slot = {sl: list(on.id[on.slot == sl]) for sl in set(SLOTS)}
+            rest = [i for i in team.sort_values("value", ascending=False).index if i not in started_ids and i not in il
+                    and status(i) != "plays"]
+            rows, placed = [], set()
+            for slot in SLOTS:  # one row per active slot, in Yahoo's order (the 3 Util spots take turns)
+                pid = by_slot[slot].pop(0) if by_slot[slot] else next((i for i in rest if fits(v.pos.get(i), slot)), None)
+                if pid in rest:
+                    rest.remove(pid)
+                placed.add(pid)
+                st_ = status(pid) if pid else ""
+                rows.append({"Slot": slot, "Player": team.name.get(pid, "(empty)") if pid else "(empty)", "Today": st_,
+                             **{c: per.loc[pid, c] if st_ == "plays" else None for c in stat_cols}})
+            for i in team.sort_values("value", ascending=False).index:  # bench: whoever's left, playing first
+                if i not in placed:
+                    rows.append({"Slot": "IL" if i in il else "BN", "Player": team.name[i], "Today": status(i),
+                                 **{c: per.loc[i, c] if status(i) == "plays" else None for c in stat_cols}})
             lineup = pd.DataFrame(rows)
-            st.caption(f"{day:%A}: start these {len(started_ids)}; best players with a game fill the active spots by "
-                       f"position. Stats are per-game projections. {len(SLOTS) - len(started_ids)} spot(s) open"
-                       + (" - a streamer with a game this day would start." if len(started_ids) < len(SLOTS) else "."))
-            st.dataframe(lineup.style.map(lambda x: "background-color: rgba(34,160,80,0.25)" if x in SLOTS else
-                                          "color: #999" if isinstance(x, str) and x.startswith(("BN (no", "IL", "BN (inj"))
-                                          else "", subset=["Slot"]).format({c: "{:.1f}" for c in stat_cols}, na_rep=""),
+            bn = lineup.Slot.isin(["BN", "IL"])
+            lineup = pd.concat([lineup[~bn], lineup[bn].sort_values("Today", key=lambda t: t.map(
+                {"plays": 0, "injured": 1, "no game": 2, "IL": 3}), kind="stable")])
+            n_open = len(SLOTS) - len(started_ids)
+            st.caption(f"{day:%A}: {len(started_ids)} of your players {'plays' if len(started_ids) == 1 else 'play'} "
+                       "and fill the green spots (best first, by position). Stats are per-game projections." +
+                       (f" {n_open} spot(s) have nobody playing: a streamer with a game this day would start there."
+                        if n_open else ""))
+            green = lineup.Today.eq("plays") & ~lineup.Slot.isin(["BN", "IL"])
+            st.dataframe(lineup.style.apply(lambda col: ["background-color: rgba(34,160,80,0.30)" if g else "" for g in green],
+                                            subset=["Slot", "Player"])
+                         .apply(lambda col: ["color: #999" if t in ("no game", "injured", "IL") else "" for t in col],
+                                subset=["Today"])
+                         .format({c: "{:.1f}" for c in stat_cols}, na_rep=""),
                          hide_index=True, height=35 * (len(lineup) + 1) + 3)
 
         stream_planner(v, team, il, cats, teams, roster, max_adds, moves, names.get(my_team) if synced else None)
