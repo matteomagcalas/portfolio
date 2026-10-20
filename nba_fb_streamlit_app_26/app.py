@@ -188,25 +188,48 @@ def fits(pos, slot):
     return bool(set(str(pos).split("/")) & SLOT_OK.get(slot, {slot}))
 
 
-def fill_lineup(team):
-    """Best players first, each into the narrowest open slot they qualify for.
-    ponytail: greedy, can misplace a dual-eligible player; an assignment solver if it matters."""
-    lineup = {i: None for i in range(len(SLOTS))}
-    for pid, p in team.sort_values("value", ascending=False).iterrows():
-        if p.wk_games == 0:
-            continue  # out all week: can't fill a slot
-        for i in sorted(lineup, key=lambda i: len(SLOT_OK.get(SLOTS[i], {SLOTS[i]}))):
-            if lineup[i] is None and fits(p.pos, SLOTS[i]):
-                lineup[i] = pid
-                break
-    return lineup
+def daily_starts(roster_ids, gl, pgv, pos):
+    """Daily lineups: each remaining day, fill the active slots from the roster players with a game that day, best
+    per-game value first, each into the narrowest open slot he qualifies for. Returns the (id, date) games started.
+    ponytail: greedy per day, can misplace a dual-eligible player; an assignment solver if it matters."""
+    started = []
+    narrow = sorted(SLOTS, key=lambda sl: len(SLOT_OK.get(sl, {sl})))
+    for date, ids in gl[gl.id.isin(roster_ids)].groupby("date").id:
+        open_slots = list(narrow)
+        for i in sorted(ids, key=lambda i: -pgv.get(i, 0)):
+            slot = next((sl for sl in open_slots if fits(pos.get(i), sl)), None)
+            if slot is not None:
+                open_slots.remove(slot)
+                started.append((i, date))
+    return started
+
+
+def started_value(roster_ids, gl, pgv, pos):
+    """Expected value of the games a roster would actually start the rest of the week."""
+    return sum(pgv.get(i, 0) for i, _ in daily_starts(roster_ids, gl, pgv, pos)) * model.P_PLAY
+
+
+@st.cache_data(show_spinner=False)
+def week_plan_inputs(cats, pool_size, updated, code):
+    """Per-game projection with this week's role boost, its per-game value over replacement (never negative), and
+    every player's remaining healthy games this week by date."""
+    d, v = data(code), board(cats, pool_size, updated, code)
+    per = v.reset_index()
+    boost = ((per.MPG + per.opp_min) / per.MPG).where(per.MPG > 0, 1)
+    per = per.assign(**{c: per[c] * boost for c in model.COUNT}, MPG=per.MPG + per.opp_min, GP=82.0)
+    pgv = model.value(per, list(cats), pool_size).set_index("id").value.reindex(v.index).fillna(0)
+    ws, we = this_week()
+    gl = model.week_games(v.index, d["games"], d["schedule"], d["injuries"], d["players"], ws, we,
+                          pd.to_datetime(d["schedule"].date).min())
+    return per.set_index("id"), pgv, gl
 
 
 def stream_planner(v, team, il, cats, teams, roster, max_adds, moves, my_name):
-    """Swap expendable players for free agents with more games left this week, within the league's weekly adds.
-    Week gain = (his expected games left x his per-game value) - (same for the player you drop); a dropped player's
-    games already played this week stay yours. Season cost = rest-of-season value given up by the swap."""
-    st.subheader("Streaming: turn adds into games")
+    """Swap expendable players for free agents whose games you'd actually START. Lineups are set daily, so an added
+    game only counts on a day you have an open slot he fits; a game on a night your 10 spots are full adds nothing.
+    Week gain = started value of the roster after the swap minus before (each game x P_PLAY). Games your dropped
+    player already played stay yours. Season change = rest-of-season value of the add minus the drop."""
+    st.subheader("Streaming: turn adds into started games")
     ws, we = this_week()
     used = 0
     if moves is not None and my_name and len(moves):
@@ -219,47 +242,46 @@ def stream_planner(v, team, il, cats, teams, roster, max_adds, moves, my_name):
                            help="Rest-of-season value lost by a swap (dropped player's value minus the add's). "
                                 "0 = only swaps that don't cost you anything long term")
     left_adds = max(cap - used, 0)
-    wk = week_board(tuple(cats), int(teams * roster), d["updated"], CODE)
-    # per-game value over replacement (never negative), with this week's starting-lineup boost
-    per = v.reset_index()
-    boost = ((per.MPG + per.opp_min) / per.MPG).where(per.MPG > 0, 1)
-    per = per.assign(**{c: per[c] * boost for c in model.COUNT}, MPG=per.MPG + per.opp_min, GP=82.0)
-    pgv = model.value(per, list(cats), int(teams * roster)).set_index("id").value.reindex(v.index).fillna(0)
-    games_left = wk.g_left.reindex(v.index).fillna(0)
-    week_left = pgv * games_left * model.P_PLAY
-    drops = team[~team.index.isin(il)]
-    fas = v[~v.Mine & ~v.Taken & (games_left > 0)]
-    fas = fas.loc[week_left[fas.index].nlargest(60).index]  # the best weeks left; plenty for pairing
-    pairs = pd.DataFrame([(dp, fa) for dp in drops.index for fa in fas.index], columns=["drop", "add"])
-    pairs["gain"] = week_left[pairs["add"]].values - week_left[pairs["drop"]].values
-    pairs["season"] = v.value[pairs["add"]].values - v.value[pairs["drop"]].values
-    pairs = pairs[(pairs.gain > 0) & (pairs.season >= -give)].sort_values("gain", ascending=False)
-    plan, used_ids = [], set()
-    for r in pairs.itertuples():  # greedy: best swap first, each player used once
-        if len(plan) >= left_adds:
+    _, pgv, gl = week_plan_inputs(tuple(cats), int(teams * roster), d["updated"], CODE)
+    pgv, pos = pgv.to_dict(), v.pos.to_dict()
+    games_left = gl.groupby("id").size()
+    roster_ids = set(team.index) - il
+    fas = v[~v.Mine & ~v.Taken].index.intersection(games_left.index)
+    fas = (pd.Series(pgv).reindex(fas) * games_left.reindex(fas)).nlargest(80).index  # the best weeks left
+    options, plan, cur = pd.DataFrame(), [], set(roster_ids)
+    for step in range(max(left_adds, 1)):  # greedy: best swap, apply it, re-plan the rest of the week
+        base = started_value(cur, gl, pgv, pos)
+        rows = [(dp, fa, started_value((cur - {dp}) | {fa}, gl, pgv, pos) - base, v.value[fa] - v.value[dp])
+                for dp in cur if dp in roster_ids for fa in fas if fa not in cur]
+        rows = pd.DataFrame(rows, columns=["drop", "add", "gain", "season"])
+        rows = rows[(rows.gain > 0.005) & (rows.season >= -give)].sort_values("gain", ascending=False)
+        if step == 0:
+            options = rows.head(30)
+        if rows.empty or step >= left_adds:
             break
-        if r.drop not in used_ids and r.add not in used_ids:
-            plan.append(r)
-            used_ids |= {r.drop, r.add}
-    st.caption(f"{used} of {cap} adds used this week ({ws:%b %d} - {we:%b %d}), {left_adds} left. Games left count "
-               f"each healthy game as {model.P_PLAY:.0%} of a game. Re-check daily: after a streamer plays, he can be "
-               "swapped again.")
-    show = lambda rows: pd.DataFrame([{"Drop": v.name[r.drop], "His games left": int(games_left[r.drop]),
-                                       "Add": v.name[r.add], "Team": v.team[r.add], "Pos": v.pos[r.add],
-                                       "Their games left": int(games_left[r.add]), "Week gain": r.gain,
-                                       "Season value change": r.season} for r in rows])
+        best = rows.iloc[0]
+        plan.append(best)
+        cur = (cur - {best["drop"]}) | {best["add"]}
+    st.caption(f"{used} of {cap} adds used this week ({ws:%b %d} - {we:%b %d}), {left_adds} left. Gains count only "
+               f"games the player would start in your daily lineup, each as {model.P_PLAY:.0%} of a game. "
+               "Re-check daily: after a streamer plays, he can be swapped again.")
+
+    def show(rows):
+        return pd.DataFrame([{"Drop": v.name[r["drop"]], "His games left": int(games_left.get(r["drop"], 0)),
+                              "Add": v.name[r["add"]], "Team": v.team[r["add"]], "Pos": v.pos[r["add"]],
+                              "Their games left": int(games_left.get(r["add"], 0)), "Week gain": r["gain"],
+                              "Season value change": r["season"]} for r in rows])
     fmt = {"Week gain": st.column_config.NumberColumn(format="%+.2f",
-                                                      help="Value of the games you gain minus the games you give up this week"),
-           "Season value change": st.column_config.NumberColumn(format="%+.2f",
-                                                                help="Rest-of-season value: add minus drop")}
+                                                      help="Value of the games you'd start this week after the swap minus before"),
+           "Season value change": st.column_config.NumberColumn(format="%+.2f", help="Rest-of-season value: add minus drop")}
     if not plan:
-        st.info("No swap adds games this week within your adds and season-value limit." if left_adds else
+        st.info("No swap adds started games this week within your adds and season-value limit." if left_adds else
                 "No adds left this week.")
     else:
-        st.markdown("**Suggested swaps**")
+        st.markdown("**Suggested swaps** (in order; each one assumes the ones above it)")
         st.dataframe(show(plan), hide_index=True, column_config=fmt)
     with st.expander("More swap options"):
-        st.dataframe(show(list(pairs.head(30).itertuples())), hide_index=True, column_config=fmt)
+        st.dataframe(show([r for _, r in options.iterrows()]), hide_index=True, column_config=fmt)
 
 
 # ---- sidebar: league setup ----
@@ -505,34 +527,48 @@ with tab_team:
         st.dataframe(styled(team.sort_values("Rank")[tcols], vv, cats),
                      hide_index=True, column_config=FMT)
         if weekly:
-            act = team[~team.index.isin(il)]  # IL slots don't score
-            tot = {c: act[c].sum() for c in ["PTS", "REB", "AST", "STL", "BLK", "3PM", "TO"]}
-            tot["FG%"], tot["FT%"] = act.FGM.sum() / act.FGA.sum(), act.FTM.sum() / act.FTA.sum()
-            st.dataframe(pd.DataFrame([{"name": f"Team total ({len(act)} players, IL excluded)", **tot}]),
+            # box scores so far this week + the remaining games your daily lineups would start (IL slots don't score)
+            per, pgv, gl = week_plan_inputs(tuple(cats), int(teams * roster), d["updated"], CODE)
+            active = set(team.index) - il
+            starts = pd.DataFrame(daily_starts(active, gl, pgv.to_dict(), v.pos.to_dict()), columns=["id", "date"])
+            g = d["games"]
+            week_day1 = (this_week()[0] - pd.to_datetime(d["schedule"].date).min()).days + 1  # Monday's season day
+            played = g[g.id.isin(active) & (g.day >= week_day1)]
+            tot = played[model.COUNT].sum() + per.loc[starts.id, model.COUNT].sum() * model.P_PLAY
+            row = {c: tot[c] for c in ["PTS", "REB", "AST", "STL", "BLK", "3PM", "TO"]}
+            row["FG%"], row["FT%"] = tot.FGM / tot.FGA, tot.FTM / tot.FTA
+            st.dataframe(pd.DataFrame([{"name": f"Team total: {len(played)} games played + {len(starts)} to start", **row}]),
                          hide_index=True, column_config=FMT)
-            st.caption("Assumes every non-IL player's games count. With more players than lineup spots on a busy "
-                       "night, some bench games won't, so the real total runs a little lower.")
+            st.caption("Remaining games count only when your daily lineup would start him (see Daily lineup below), "
+                       f"each as {model.P_PLAY:.0%} of a game. Games already played count in full, even if he sat on "
+                       "your bench that day (the app can't see your past lineups).")
         team = v[v.Mine]
 
-        # Fantasy week = Monday-Sunday; before opening night, use the opening week.
-        start = max(pd.Timestamp.now().normalize(), pd.to_datetime(d["schedule"].date).min())
-        week = (start - pd.Timedelta(days=start.weekday()), start + pd.Timedelta(days=6 - start.weekday()))
-        v["wk_games"] = model.games_between(v.index, d["injuries"], d["schedule"], d["players"], start, week[1]).values
         team = v[v.Mine]
-        lineup = fill_lineup(team.drop(il & set(team.index)))
-
-        st.subheader(f"Lineup: week of {week[0]:%b %d} - {week[1]:%b %d}")
-        st.caption("Your best lineup this week, slot by slot. Players out all week leave their slot empty. "
-                   "Updates as injuries and schedules change.")
-        rows = [{"Slot": slot, "Player": team.loc[pid, "name"] if pid is not None else "EMPTY",
-                 "Value": team.loc[pid, "value"] if pid is not None else None,
-                 "Games this wk": team.loc[pid, "wk_games"] if pid is not None else 0} for slot, pid in zip(SLOTS, lineup.values())]
-        rows += [{"Slot": "IL", "Player": p["name"], "Value": p.value, "Games this wk": p.wk_games}
-                 for _, p in team[team.index.isin(il)].iterrows()]  # no IL rows when nobody's on IL
-        bench = team.drop([p for p in lineup.values() if p is not None] + list(il & set(team.index)))
-        st.dataframe(pd.DataFrame(rows), hide_index=True, column_config={"Value": st.column_config.NumberColumn(format="%.2f")})
-        if len(bench):
-            st.caption("Bench: " + ", ".join(f"{p['name']} ({p.wk_games} g)" for _, p in bench.iterrows()))
+        _, pgv, gl = week_plan_inputs(tuple(cats), int(teams * roster), d["updated"], CODE)
+        ws, we = this_week()
+        starts = set(daily_starts(set(team.index) - il, gl, pgv.to_dict(), v.pos.to_dict()))
+        days = sorted(gl.date.unique())
+        st.subheader(f"Daily lineup: rest of the week of {ws:%b %d} - {we:%b %d}")
+        st.caption("Lineups are set each day: your best players with a game that day fill the active spots (by "
+                   "position); the rest of that day's players sit. Blank = no game, or injured.")
+        if not days:
+            st.info("No games left this week.")
+        else:
+            mine_gl = set(zip(gl.id, gl.date))
+            grid = pd.DataFrame({"Player": team.name, "Slot": ["IL" if i in il else "" for i in team.index]},
+                                index=team.index)
+            for dt in days:
+                grid[f"{pd.Timestamp(dt):%a %m/%d}"] = ["START" if (i, dt) in starts else "bench" if (i, dt) in mine_gl
+                                                        else "" for i in team.index]
+            grid["Starts"] = [sum((i, dt) in starts for dt in days) for i in team.index]
+            grid = grid.loc[team.sort_values("value", ascending=False).index]
+            st.dataframe(grid.style.map(lambda x: "background-color: rgba(34,160,80,0.35)" if x == "START" else
+                                        "color: #999" if x == "bench" else "", subset=list(grid.columns[2:-1])),
+                         hide_index=True)
+            open_ = {dt: len(SLOTS) - sum(1 for _, d2 in starts if d2 == dt) for dt in days}
+            st.caption("Open active spots by day: " + ", ".join(f"{pd.Timestamp(dt):%a} {n}" for dt, n in open_.items()) +
+                       ". Streamers help most on days with open spots.")
 
         stream_planner(v, team, il, cats, teams, roster, max_adds, moves, names.get(my_team) if synced else None)
 

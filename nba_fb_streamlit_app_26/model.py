@@ -371,26 +371,35 @@ def with_role(proj, promo, mpg_per_start):
 P_PLAY = 0.89
 
 
+def week_games(ids, games, schedule, injuries, players, start, end, opener):
+    """Each player's remaining healthy games in [start, end]: (id, date) rows. A team's game is remaining until its
+    box score is in; games before an injury return date don't count; out with no date or for the season = none."""
+    day = lambda ts: (pd.Timestamp(ts) - opener).days + 1
+    sched = schedule.assign(date=pd.to_datetime(schedule.date))
+    sched["day"] = sched.date.map(day)
+    sched = sched[(sched.day >= day(start)) & (sched.day <= day(end))]
+    logged = games.astype({"day": float}).groupby("team_id").day.max()  # played once its box score is in
+    sched = sched[sched.day > sched.team_id.map(logged).fillna(-1)]
+    team = players.set_index("id").team_id.reindex(ids)
+    inj = injuries.drop_duplicates("id").set_index("id").reindex(ids)
+    ret = pd.to_datetime(inj.return_date)
+    done = inj.season_out.fillna(False).astype(bool) | ((inj.status == "Out") & ret.isna())
+    rows = pd.DataFrame({"id": ids, "team": team.values})[~done.values].merge(sched, left_on="team", right_on="team_id")
+    rows = rows[rows.date >= rows.id.map(ret).fillna(pd.Timestamp.min)]
+    return rows[["id", "date"]].reset_index(drop=True)
+
+
 def week(proj, games, schedule, injuries, players, start, end, opener):
     """Projected category TOTALS for a fantasy week [start, end]: what each player already did this week plus,
-    for each of his team's games not yet in the box scores, P_PLAY x his per-game projection (proj, which
-    should include any role boost). Games before an injury return date don't count; out with no date or
-    for the season = no more games. FG%/FT% from the summed makes and attempts."""
+    for each of his remaining healthy games (week_games), P_PLAY x his per-game projection (proj, which should
+    include any role boost). FG%/FT% from the summed makes and attempts."""
     day = lambda ts: (pd.Timestamp(ts) - opener).days + 1
     g = games.astype({"day": float})
     played = g[(g.day >= day(start)) & (g.day <= day(end))]
     p = proj.set_index("id") if "id" in proj else proj
     actual = played.groupby("id")[COUNT + ["MPG"]].sum().reindex(p.index).fillna(0)
-    sched = schedule.assign(day=pd.to_datetime(schedule.date).map(day))
-    sched = sched[(sched.day >= day(start)) & (sched.day <= day(end))]
-    logged = g.groupby("team_id").day.max()  # a game counts as played once its box score is in
-    sched = sched[sched.day > sched.team_id.map(logged).fillna(-1)]
-    team = players.set_index("id").team_id.reindex(p.index)
-    inj = injuries.drop_duplicates("id").set_index("id").reindex(p.index)
-    ret = pd.to_datetime(inj.return_date).map(lambda r: day(r) if pd.notna(r) else None)
-    done = inj.season_out.fillna(False).astype(bool) | ((inj.status == "Out") & ret.isna())
-    left = pd.Series([0 if dn else int(((sched.team_id == t) & (sched.day >= (r if pd.notna(r) else 0))).sum())
-                      for t, r, dn in zip(team, ret, done)], index=p.index)  # healthy games left: shown
+    left = week_games(p.index, games, schedule, injuries, players, start, end, opener).groupby("id").size()
+    left = left.reindex(p.index).fillna(0).astype(int)  # healthy games left: shown
     exp = left * P_PLAY  # expected games played: what the totals use
     out = actual[COUNT].add(p[COUNT].fillna(0).mul(exp, axis=0))
     out["g_played"] = played.groupby("id").size().reindex(p.index).fillna(0).astype(int)
