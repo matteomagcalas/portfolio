@@ -705,12 +705,12 @@ with tab_match:
             m, a = model.PCT[c]
             tbl.loc[c, "Me so far"] = me_row[m] / me_row[a] if me_row[a] else None
             tbl.loc[c, "Them so far"] = opp_row[m] / opp_row[a] if opp_row[a] else None
-        pct = tbl.index.isin(["FG%", "FT%"])
+        nums = ["Me so far", "Them so far", "Me projected", "Them projected"]
+        tbl.loc[["FG%", "FT%"], nums] = tbl.loc[["FG%", "FT%"], nums] * 100  # shown as percents: 46.83
+        tbl[nums] = tbl[nums].astype(float).round(2)
         st.dataframe(tbl.reset_index(names="Category").style
-                     .format({c: "{:.2f}" for c in ["Me so far", "Them so far", "Me projected", "Them projected"]}, na_rep="")
-                     .format({c: "{:.2%}" for c in ["Me so far", "Them so far", "Me projected", "Them projected"]},
-                             subset=pd.IndexSlice[pct, :], na_rep="")
-                     .format({"Win %": "{:.0%}"})
+                     .format("{:.2f}", subset=nums, na_rep="")
+                     .format("{:.0%}", subset=["Win %"])
                      .apply(lambda col: [shade((x - 0.5) * 2) for x in col], subset=["Win %"]),
                      hide_index=True)
         st.caption("So far = Yahoo's totals (games in your active lineup). Projected = so far + each side's remaining "
