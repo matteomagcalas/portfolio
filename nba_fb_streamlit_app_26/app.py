@@ -747,13 +747,12 @@ with tab_team:
                             act, spare = (act - {y}) | {x}, [z for z in spare if z != y]
                             break
             rows = [{"Slot": sl, "Player": team.name.get(i, "(empty)") if i is not None else "(empty)",
-                     "Matchup": status(i) if i is not None else "", "Tip": tips.get(i, ""),
+                     "Matchup": status(i) if i is not None else "",
                      **{c: per.loc[i, c] if i in playing else None for c in stat_cols + shot_cols}} for sl, i in assigned]
             placed = {i for _, i in assigned}
             for i in team.sort_values("value", ascending=False).index:  # bench: whoever's left, playing first
                 if i not in placed:
                     rows.append({"Slot": "IL" if i in il else "BN", "Player": team.name[i], "Matchup": status(i),
-                                 "Tip": tips.get(i, ""),
                                  **{c: per.loc[i, c] if i in playing else None for c in stat_cols + shot_cols}})
             lineup = pd.DataFrame(rows)
             bn = lineup.Slot.isin(["BN", "IL"])
@@ -768,8 +767,6 @@ with tab_team:
                       for x, t in tips.items() if t.startswith("↑")]
             if moves_:
                 st.markdown(f":orange[⚠ Lineup check for {day:%A}: " + "; ".join(moves_) + ".]")
-            if "Tip" in lineup and not lineup.Tip.str.len().any():
-                lineup = lineup.drop(columns="Tip")
             green = [r["Matchup"] not in ("", "IL") and not str(r["Matchup"]).startswith("OUT") and r["Slot"] not in ("BN", "IL")
                      for _, r in lineup.iterrows()]
             sty = (lineup.style.apply(lambda col: ["background-color: rgba(34,160,80,0.30)" if g else "" for g in green],
@@ -778,8 +775,6 @@ with tab_team:
                           subset=["Matchup"])
                    .format({**{c: "{:.1f}" for c in stat_cols + ["FGA", "FTA"]}, "FG%": "{:.1%}", "FT%": "{:.1%}"},
                            na_rep=""))
-            if "Tip" in lineup:
-                sty = sty.apply(lambda col: ["color: #E8A33D; font-weight: 600" if t else "" for t in col], subset=["Tip"])
             st.dataframe(sty, hide_index=True, height=35 * (len(lineup) + 1) + 3)
 
         stream_planner(v, team, il, cats, teams, roster, max_adds, moves, names.get(my_team) if synced else None)
@@ -804,9 +799,8 @@ with tab_match:
         base, p0, options, starts, opp_starts, p_rec = matchup_plan(
             active(my_team), active(int(me_row.opp_id)), tuple(v.index[~v.Mine & ~v.Taken]), bank(me_row), bank(opp_row),
             tuple(cats), today, d["updated"], CODE, int(teams * roster), give, v.value,
-            # you: what you've set in Yahoo; opponent: today's set lineup, then their best lineup (they can still
-            # fix later days, so their sloppy future lineups shouldn't inflate your odds)
-            yahoo_active(my_team, wk_days), yahoo_active(int(me_row.opp_id), wk_days[:1]))
+            # you: what you've set in Yahoo; opponent: their best lineup every day (assume the worst for you)
+            yahoo_active(my_team, wk_days), ())
         m1, m2, m3 = st.columns(3)
         m1.metric("Chance to win the matchup", f"{p0:.0%}",
                   f"{p_rec - p0:+.0%} with the recommended lineup" if abs(p_rec - p0) >= 0.005 else None,
@@ -829,8 +823,8 @@ with tab_match:
                      .apply(lambda col: [shade((x - 0.5) * 2) for x in col], subset=["Win %"]),
                      hide_index=True)
         st.caption("So far = Yahoo's totals (games in active lineups). Projected = so far + remaining games started: "
-                   "yours as you've set them in Yahoo, your opponent's as set today and their best lineup after that (they "
-                   f"can still change later days). Each game counts as {model.P_PLAY:.0%} of a game. FG%/FT% come from projected makes and attempts, so a shooter moves them "
+                   "yours as you've set them in Yahoo, your opponent's as their best possible lineup every day (the worst case "
+                   f"for you). Each game counts as {model.P_PLAY:.0%} of a game. FG%/FT% come from projected makes and attempts, so a shooter moves them "
                    "only as much as his attempts allow. Win % has the game-to-game swings of each stat measured from "
                    "past seasons.")
 
