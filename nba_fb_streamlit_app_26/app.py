@@ -3,6 +3,7 @@ import hashlib
 import importlib
 from pathlib import Path
 
+import numpy as np
 import pandas as pd
 import streamlit as st
 
@@ -194,7 +195,9 @@ def daily_starts(roster_ids, gl, pgv, pos):
     ponytail: greedy per day, can misplace a dual-eligible player; an assignment solver if it matters."""
     started = []
     narrow = sorted(SLOTS, key=lambda sl: len(SLOT_OK.get(sl, {sl})))
-    for date, ids in gl[gl.id.isin(roster_ids)].groupby("date").id:
+    by_day = gl if isinstance(gl, dict) else by_date(gl)  # {date: ids with a game}; prebuilt when called in a loop
+    for date, ids in sorted(by_day.items()):
+        ids = [i for i in ids if i in roster_ids]
         open_slots = list(narrow)
         for i in sorted(ids, key=lambda i: -pgv.get(i, 0)):
             slot = next((sl for sl in open_slots if fits(pos.get(i), sl)), None)
@@ -202,6 +205,11 @@ def daily_starts(roster_ids, gl, pgv, pos):
                 open_slots.remove(slot)
                 started.append((i, date, slot))
     return started
+
+
+def by_date(gl):
+    """(id, date) game rows -> {date: [ids playing that day]}."""
+    return {dt: list(g.id) for dt, g in gl.groupby("date")}
 
 
 def started_value(roster_ids, gl, pgv, pos):
@@ -224,6 +232,57 @@ def week_plan_inputs(cats, pool_size, updated, code):
     return per.set_index("id"), pgv, gl
 
 
+def adds_used(moves, my_name, since):
+    """Adds your team has made since `since` (Yahoo transactions)."""
+    if moves is None or not my_name or not len(moves):
+        return 0
+    return int(((moves.type == "add") & (moves.to == my_name) & (moves.time.dt.tz_localize(None) >= since)).sum())
+
+
+@st.cache_data(show_spinner="Working out your matchup...")
+def matchup_plan(my_ids, opp_ids, fa_ids, banked, banked_opp, cats, today, updated, code, pool_size, give, season_value):
+    """Win chance now, and how each start/bench switch and each add/drop would change it. Rosters as tuples of ids.
+    Remaining games = the ones each side's daily lineup would start (best players with a game, by position)."""
+    per, pgv, gl = week_plan_inputs(cats, pool_size, updated, code)
+    v = board(cats, pool_size, updated, code)
+    pgv, pos = pgv.to_dict(), v.pos.to_dict()
+    vec = {i: r for i, r in zip(per.index, per[model.COUNT].fillna(0).to_numpy())}
+    zero = np.zeros(len(model.COUNT))
+    gl = gl[gl.date >= today]
+    days = by_date(gl)
+    banked, banked_opp = dict(banked), dict(banked_opp)
+
+    def odds(starts, opp_starts):
+        return model.week_odds(banked, [vec.get(i, zero) for i, _, _ in starts],
+                               banked_opp, [vec.get(i, zero) for i, _, _ in opp_starts], list(cats))
+
+    opp_starts = daily_starts(set(opp_ids), days, pgv, pos)
+    starts = daily_starts(set(my_ids), days, pgv, pos)
+    base, p0 = odds(starts, opp_starts)
+    moves = []
+    # start/bench: put a benched player with a game into a starter's spot that day
+    playing = gl[gl.id.isin(my_ids)]
+    started = {(i, dt) for i, dt, _ in starts}
+    for i, dt, slot in starts:
+        for j in playing.id[playing.date == dt]:
+            if (j, dt) not in started and fits(pos.get(j), slot):
+                alt = [(j, dt, slot) if (a, b) == (i, dt) else (a, b, c) for a, b, c in starts]
+                o, p = odds(alt, opp_starts)
+                moves.append({"kind": "start", "date": dt, "in": j, "out": i, "p": p, "cats": o.p_win - base.p_win})
+    # add/drop: free agents with games left, swapped for anyone on your active roster
+    left = gl.groupby("id").size()
+    fas = [f for f in fa_ids if f in left.index]
+    fas = sorted(fas, key=lambda f: -pgv.get(f, 0) * left[f])[:80]
+    for dp in my_ids:
+        for fa in fas:
+            if season_value[fa] - season_value[dp] < -give:
+                continue
+            roster = (set(my_ids) - {dp}) | {fa}
+            o, p = odds(daily_starts(roster, days, pgv, pos), opp_starts)
+            moves.append({"kind": "add", "date": None, "in": fa, "out": dp, "p": p, "cats": o.p_win - base.p_win})
+    return base, p0, pd.DataFrame(moves), starts, opp_starts
+
+
 def stream_planner(v, team, il, cats, teams, roster, max_adds, moves, my_name):
     """Swap expendable players for free agents whose games you'd actually START. Lineups are set daily, so an added
     game only counts on a day you have an open slot he fits; a game on a night your 10 spots are full adds nothing.
@@ -231,10 +290,7 @@ def stream_planner(v, team, il, cats, teams, roster, max_adds, moves, my_name):
     player already played stay yours. Season change = rest-of-season value of the add minus the drop."""
     st.subheader("Streaming: turn adds into started games")
     ws, we = this_week()
-    used = 0
-    if moves is not None and my_name and len(moves):
-        t = moves.time.dt.tz_localize(None)
-        used = int(((moves.type == "add") & (moves.to == my_name) & (t >= ws)).sum())
+    used = adds_used(moves, my_name, ws)
     c1, c2 = st.columns(2)
     cap = c1.number_input("Adds per week (league setting)", 0, 50, max_adds if max_adds is not None else 4,
                           help="Read from your Yahoo league when synced")
@@ -246,6 +302,7 @@ def stream_planner(v, team, il, cats, teams, roster, max_adds, moves, my_name):
     pgv, pos = pgv.to_dict(), v.pos.to_dict()
     games_left = gl.groupby("id").size()
     roster_ids = set(team.index) - il
+    gl = by_date(gl)  # built once for the loop below
     fas = v[~v.Mine & ~v.Taken].index.intersection(games_left.index)
     fas = (pd.Series(pgv).reindex(fas) * games_left.reindex(fas)).nlargest(80).index  # the best weeks left
     options, plan, cur = pd.DataFrame(), [], set(roster_ids)
@@ -291,12 +348,12 @@ with st.sidebar:
     league_id = st.text_input("Yahoo league ID", st.query_params.get("league", ""),
                               help="The number in your league URL: basketball.fantasysports.yahoo.com/nba/<ID>. "
                                    "The league must be public. Leave blank to tick Mine/Taken by hand.").strip()
-    rosters = moves = max_adds = None
+    rosters = moves = max_adds = scoreboard = None
     if league_id != st.query_params.get("league", ""):
         st.query_params["league"] = league_id
     if league_id:
         try:
-            rosters, moves, max_adds = league(league_id, CODE)
+            rosters, moves, max_adds, scoreboard = league(league_id, CODE)
         except Exception as e:
             st.error(f"Couldn't read Yahoo league {league_id} (is it public?): {e}")
     if rosters is not None and len(rosters):
@@ -428,8 +485,9 @@ if weekly:
     st.caption(f"Week of {ws:%b %d} - {we:%b %d}: totals = played so far + expected remaining games "
                f"(each healthy game counts {model.P_PLAY:.0%}, the share rotation players actually play). Weeks run Monday-Sunday.")
 
-tab_draft, tab_team, tab_star, tab_waiver = st.tabs([":material/sports_basketball: Available Players",
-                                                     ":material/groups: My team", ":material/star: Starred",
+tab_draft, tab_team, tab_match, tab_star, tab_waiver = st.tabs([":material/sports_basketball: Available Players",
+                                                     ":material/groups: My team", ":material/scoreboard: Matchup",
+                                                     ":material/star: Starred",
                                            ":material/swap_horiz: Waivers / pickups"])
 
 with tab_draft:
@@ -615,6 +673,88 @@ with tab_team:
                          hide_index=True, height=35 * (len(lineup) + 1) + 3)
 
         stream_planner(v, team, il, cats, teams, roster, max_adds, moves, names.get(my_team) if synced else None)
+
+with tab_match:
+    if not synced or scoreboard is None or scoreboard.empty or my_team not in set(scoreboard.team_id):
+        st.info("Connect your Yahoo league in the sidebar to see this week's matchup.")
+    else:
+        me_row = scoreboard[scoreboard.team_id == my_team].iloc[0]
+        opp_row = scoreboard[scoreboard.team_id == me_row.opp_id].iloc[0]
+        opp_name = names.get(int(me_row.opp_id), "Opponent")
+        st.subheader(f"Week {me_row.week}: {names.get(my_team)} vs {opp_name}")
+        active = lambda t: tuple(sorted(int(i) for i in rostered.id[(rostered.team_id == t) & ~rostered.slot.str.startswith("IL")]))
+        today = pd.Timestamp.now(tz="America/New_York").tz_localize(None).normalize()
+        c1, c2 = st.columns(2)
+        give = c1.number_input("Most season value you'll give up per add", 0.0, 5.0, 0.5, 0.1, key="match_give",
+                               help="Adds that cost more rest-of-season value than this aren't suggested")
+        adds_left = max((max_adds if max_adds is not None else 4) - adds_used(moves, names.get(my_team), this_week()[0]), 0)
+        c2.metric("Adds left this week", adds_left)
+        bank = lambda r: tuple((c, float(r.get(c, 0) or 0)) for c in model.COUNT)
+        base, p0, options, starts, opp_starts = matchup_plan(
+            active(my_team), active(int(me_row.opp_id)), tuple(v.index[~v.Mine & ~v.Taken]), bank(me_row), bank(opp_row),
+            tuple(cats), today, d["updated"], CODE, int(teams * roster), give, v.value)
+        m1, m2, m3 = st.columns(3)
+        m1.metric("Chance to win the matchup", f"{p0:.0%}", border=True)
+        m2.metric("Categories expected", f"{base.p_win.sum():.1f} of {len(cats)}", border=True)
+        m3.metric("Games left to start", f"{len(starts)} vs {len(opp_starts)}", border=True)
+        tbl = pd.DataFrame({"Me so far": [me_row.get(c) for c in base.index], "Them so far": [opp_row.get(c) for c in base.index],
+                            "Me projected": base.me, "Them projected": base.opp, "Win %": base.p_win}, index=base.index)
+        for c in ("FG%", "FT%"):  # so-far percentages from made/attempted
+            m, a = model.PCT[c]
+            tbl.loc[c, "Me so far"] = me_row[m] / me_row[a] if me_row[a] else None
+            tbl.loc[c, "Them so far"] = opp_row[m] / opp_row[a] if opp_row[a] else None
+        pct = tbl.index.isin(["FG%", "FT%"])
+        st.dataframe(tbl.reset_index(names="Category").style
+                     .format({c: "{:.1f}" for c in ["Me so far", "Them so far", "Me projected", "Them projected"]}, na_rep="")
+                     .format({c: "{:.3f}" for c in ["Me so far", "Them so far", "Me projected", "Them projected"]},
+                             subset=pd.IndexSlice[pct, :], na_rep="")
+                     .format({"Win %": "{:.0%}"})
+                     .apply(lambda col: [shade((x - 0.5) * 2) for x in col], subset=["Win %"]),
+                     hide_index=True)
+        st.caption("So far = Yahoo's totals (games in your active lineup). Projected = so far + each side's remaining "
+                   f"games their daily lineup would start, each as {model.P_PLAY:.0%} of a game; your opponent is assumed "
+                   "to start their best players. FG%/FT% come from projected makes and attempts, so a shooter moves them "
+                   "only as much as his attempts allow. Win % has the game-to-game swings of each stat measured from "
+                   "past seasons.")
+
+        def why(cats_change):
+            up = cats_change[cats_change > 0.02].sort_values(ascending=False)
+            down = cats_change[cats_change < -0.02].sort_values()
+            return ", ".join([f"{c} +{x:.0%}" for c, x in up.head(3).items()] + [f"{c} {x:.0%}" for c, x in down.head(2).items()])
+
+        if options.empty:
+            st.info("No start/bench switch or add improves your chances right now.")
+        else:
+            options = options.assign(gain=options.p - p0)
+            st.markdown("**Who to start** (switches from the default lineup above that raise your chance to win)")
+            sw = options[(options.kind == "start") & (options.gain > 0.005)].sort_values("gain", ascending=False)
+            if sw.empty:
+                st.caption("The default daily lineup (best players with a game) is already your best shot.")
+            else:
+                st.dataframe(pd.DataFrame({
+                    "Day": sw.date.map(lambda x: f"{pd.Timestamp(x):%a %m/%d}"), "Start": sw["in"].map(v.name),
+                    "Instead of": sw["out"].map(v.name), "Win chance": sw.p, "Change": sw.gain,
+                    "Categories": sw.cats.map(why)}).head(10), hide_index=True,
+                    column_config={"Win chance": st.column_config.NumberColumn(format="percent"),
+                                   "Change": st.column_config.NumberColumn(format="%+.1%")})
+            st.markdown(f"**Who to add** ({adds_left} add(s) left this week)")
+            ad = options[(options.kind == "add") & (options.gain > 0.005)].sort_values("gain", ascending=False)
+            if not adds_left:
+                st.caption("No adds left this week.")
+            elif ad.empty:
+                st.caption("No free agent raises your chance to win within your season-value limit.")
+            else:
+                st.dataframe(pd.DataFrame({
+                    "Add": ad["in"].map(v.name), "Team": ad["in"].map(v.team), "Drop": ad["out"].map(v.name),
+                    "Win chance": ad.p, "Change": ad.gain, "Categories": ad.cats.map(why),
+                    "Season value change": ad["in"].map(v.value).values - ad["out"].map(v.value).values}).head(10),
+                    hide_index=True,
+                    column_config={"Win chance": st.column_config.NumberColumn(format="percent"),
+                                   "Change": st.column_config.NumberColumn(format="%+.1%"),
+                                   "Season value change": st.column_config.NumberColumn(format="%+.2f")})
+            st.caption("Changes are in your chance to win the whole matchup; Categories lists the biggest moves in each "
+                       "category's win chance. A low-volume shooter barely moves FG%/FT% and costs counting stats, so "
+                       "he won't show up here.")
 
 with tab_waiver:
     team = v[v.Mine]

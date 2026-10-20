@@ -389,6 +389,50 @@ def week_games(ids, games, schedule, injuries, players, start, end, opener):
     return rows[["id", "date"]].reset_index(drop=True)
 
 
+# Game-to-game spread of each stat, as variance / mean per game (pooled over players with 20+ games of 10+ minutes;
+# 2024-25 / 2025-26 gave the same numbers). Points swing ~3x a Poisson count; threes, steals, blocks, turnovers ~1x.
+VAR_RATIO = {"PTS": 3.0, "REB": 1.35, "AST": 1.25, "STL": 1.07, "BLK": 1.1, "3PM": 1.15, "TO": 1.02}
+# Makes given attempts vs. a coin flip at his percentage (same seasons): FG 0.91, FT 1.0. So a shooter moves FG%/FT%
+# only in proportion to his ATTEMPTS: a 90% free-throw shooter with 1 attempt a game barely moves it.
+SHOT_VAR = {"FG%": 0.91, "FT%": 1.0}
+PCT = {"FG%": ("FGM", "FGA"), "FT%": ("FTM", "FTA")}
+
+
+def week_odds(banked, games, banked_opp, games_opp, cats):
+    """Chance to win each category this week and the matchup (most categories). banked: dict of totals so far
+    (COUNT stats); games: array (games x COUNT) of per-game projections for each remaining game he'll START.
+    Each game is played with P_PLAY. Normal approximation per category; categories treated as independent."""
+    from math import erf, sqrt
+
+    def side(b, g):
+        g = np.asarray(g, dtype=float).reshape(-1, len(COUNT))
+        mu = {c: b.get(c, 0) + P_PLAY * g[:, k].sum() for k, c in enumerate(COUNT)}
+        var = {c: (P_PLAY * VAR_RATIO.get(c, 1) * g[:, k] + P_PLAY * (1 - P_PLAY) * g[:, k] ** 2).sum()
+               for k, c in enumerate(COUNT)}
+        for pc, (m, a) in PCT.items():
+            gm, ga = g[:, COUNT.index(m)], g[:, COUNT.index(a)]
+            p_g = np.divide(gm, ga, out=np.zeros_like(gm), where=ga > 0)
+            mu[pc] = mu[m] / mu[a] if mu[a] > 0 else 0.0
+            var[pc] = SHOT_VAR[pc] * P_PLAY * (ga * p_g * (1 - p_g)).sum() / mu[a] ** 2 if mu[a] > 0 else 0.0
+        return mu, var
+
+    (m1, v1), (m2, v2) = side(banked, games), side(banked_opp, games_opp)
+    rows = []
+    for c in cats:
+        diff = (m2[c] - m1[c]) if c == "TO" else (m1[c] - m2[c])  # fewer turnovers wins
+        sd = sqrt(v1[c] + v2[c])
+        p = (0.5 + 0.5 * erf(diff / (sd * sqrt(2)))) if sd > 0 else (1.0 if diff > 0 else 0.0 if diff < 0 else 0.5)
+        rows.append({"cat": c, "me": m1[c], "opp": m2[c], "p_win": p})
+    out = pd.DataFrame(rows).set_index("cat")
+    dist = np.array([1.0])  # number of categories won: Poisson-binomial
+    for p in out.p_win:
+        dist = np.convolve(dist, [1 - p, p])
+    n = len(cats)
+    win = dist[n // 2 + 1:].sum()
+    tie = dist[n // 2] if n % 2 == 0 else 0.0
+    return out, win + tie / 2
+
+
 def week(proj, games, schedule, injuries, players, start, end, opener):
     """Projected category TOTALS for a fantasy week [start, end]: what each player already did this week plus,
     for each of his remaining healthy games (week_games), P_PLAY x his per-game projection (proj, which should

@@ -106,10 +106,15 @@ def _flat(parts):
     return {k: v for p in parts if isinstance(p, dict) for k, v in p.items()}
 
 
+YAHOO_STAT = {"10": "3PM", "12": "PTS", "15": "REB", "16": "AST", "17": "STL", "18": "BLK", "19": "TO"}
+YAHOO_PAIR = {"9004003": ("FGM", "FGA"), "9007006": ("FTM", "FTA")}  # shown as "made/attempted"
+
+
 def yahoo_league(league_id):
     """Live rosters and recent moves of a public Yahoo league (no login needed).
     Returns (rosters: team_id, team, key, name, slot (today's Yahoo slot: PG..Util, BN, IL); moves: time, type, name, from, to;
-    max_adds: the league's adds per week, None if unlimited); key = normalized name."""
+    max_adds: the league's adds per week, None if unlimited; scoreboard: this week's matchups, one row per team with
+    opp_id and its category totals so far, counted by Yahoo from active-lineup games only); key = normalized name."""
     url = f"https://pub-api-rw.fantasysports.yahoo.com/fantasy/v2/league/nba.l.{league_id}/{{}}?format=json"
     h = {"User-Agent": "Mozilla/5.0"}
     teams = _get(url.format("teams/roster"), headers=h)["fantasy_content"]["league"][1]["teams"]
@@ -136,9 +141,27 @@ def yahoo_league(league_id):
                           "type": move["type"], "name": _flat(p[0])["name"]["full"],
                           "from": move.get("source_team_name", move.get("source_type", "")),
                           "to": move.get("destination_team_name", move.get("destination_type", ""))})
+    sb = _get(url.format("scoreboard"), headers=h)["fantasy_content"]["league"][1]["scoreboard"]
+    board = []
+    for k in range(sb["0"]["matchups"]["count"]):
+        m = sb["0"]["matchups"][str(k)]["matchup"]
+        sides = [m["0"]["teams"][j]["team"] for j in ("0", "1")]
+        ids = [int(_flat(t[0])["team_id"]) for t in sides]
+        for t, me, opp in zip(sides, ids, ids[::-1]):
+            row = {"team_id": me, "opp_id": opp, "week": int(m["week"]), "week_start": m["week_start"],
+                   "week_end": m["week_end"]}
+            for x in t[1]["team_stats"]["stats"]:
+                sid, val = x["stat"]["stat_id"], x["stat"]["value"]
+                if sid in YAHOO_PAIR and "/" in str(val):  # "made/attempted"
+                    made, att = (str(val).split("/") + [""])[:2]
+                    row[YAHOO_PAIR[sid][0]], row[YAHOO_PAIR[sid][1]] = float(made or 0), float(att or 0)
+                elif sid in YAHOO_STAT:
+                    row[YAHOO_STAT[sid]] = float(val or 0)
+            board.append(row)
     settings = _get(url.format("settings"), headers=h)["fantasy_content"]["league"][1]["settings"][0]
     max_adds = int(settings["max_weekly_adds"]) if str(settings.get("max_weekly_adds", "")).isdigit() else None
-    return pd.DataFrame(rosters), pd.DataFrame(moves, columns=["time", "type", "name", "from", "to"]), max_adds
+    return (pd.DataFrame(rosters), pd.DataFrame(moves, columns=["time", "type", "name", "from", "to"]), max_adds,
+            pd.DataFrame(board))
 
 
 def _players(season):

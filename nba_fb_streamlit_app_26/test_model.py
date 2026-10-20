@@ -53,4 +53,12 @@ et = lambda t: pd.Timestamp(t, tz="America/New_York")
 assert espn.stale(et("2026-10-21 21:00").timestamp(), et("2026-10-22 08:00"))
 assert not espn.stale(et("2026-10-22 04:00").timestamp(), et("2026-10-22 08:00"))
 assert espn.stale(et("2026-10-22 04:00").timestamp(), et("2026-10-22 11:00"))  # 6h cap
+# matchup odds: mirror teams = coin flip; FT% barely moves for a low-volume shooter
+cats9 = model.CATS["9-cat H2H"]
+gm = [[20, 8, 5, 1, 1, 2, 2, 7, 15, 4, 5]] * 30
+cat_odds, p = model.week_odds({}, gm, {}, gm, cats9)
+assert abs(p - 0.5) < 1e-9 and (cat_odds.p_win - 0.5).abs().max() < 1e-9, p
+ft_guy = [[2, 1, 1, 0, 0, 0, 0, 1, 2, 0.95, 1]] * 3  # 95% FT on 1 attempt a game, 3 games
+better, _ = model.week_odds({}, gm + ft_guy, {}, gm, cats9)
+assert better.loc["FT%", "p_win"] < 0.56, better.loc["FT%", "p_win"]
 print("ok")
