@@ -614,6 +614,7 @@ with tab_team:
                                     default=next((k for k, dt in week_days.items() if dt == today), list(week_days)[0]))
         day = week_days.get(pick or "", today)
         stat_cols = ["PTS", "REB", "AST", "STL", "BLK", "3PM", "TO"]
+        shot_cols = ["FG%", "FGA", "FT%", "FTA"]  # percentages next to their volume
         if day < today:  # done: what your players actually did
             g = d["games"]
             box = g[g.id.isin(team.index) & (g.day == (day - pd.to_datetime(d["schedule"].date).min()).days + 1)]
@@ -650,11 +651,11 @@ with tab_team:
                 placed.add(pid)
                 st_ = status(pid) if pid else ""
                 rows.append({"Slot": slot, "Player": team.name.get(pid, "(empty)") if pid else "(empty)", "Matchup": st_,
-                             **{c: per.loc[pid, c] if pid in playing else None for c in stat_cols}})
+                             **{c: per.loc[pid, c] if pid in playing else None for c in stat_cols + shot_cols}})
             for i in team.sort_values("value", ascending=False).index:  # bench: whoever's left, playing first
                 if i not in placed:
                     rows.append({"Slot": "IL" if i in il else "BN", "Player": team.name[i], "Matchup": status(i),
-                                 **{c: per.loc[i, c] if i in playing else None for c in stat_cols}})
+                                 **{c: per.loc[i, c] if i in playing else None for c in stat_cols + shot_cols}})
             lineup = pd.DataFrame(rows)
             bn = lineup.Slot.isin(["BN", "IL"])
             rank = lambda t: t.map(lambda x: 3 if x == "IL" else 1 if x.startswith("OUT") else 2 if x == "" else 0)
@@ -669,7 +670,8 @@ with tab_team:
                                             subset=["Slot", "Player"])
                          .apply(lambda col: ["color: #999" if t == "IL" or t.startswith("OUT") else "" for t in col],
                                 subset=["Matchup"])
-                         .format({c: "{:.1f}" for c in stat_cols}, na_rep=""),
+                         .format({**{c: "{:.1f}" for c in stat_cols + ["FGA", "FTA"]}, "FG%": "{:.1%}", "FT%": "{:.1%}"},
+                                 na_rep=""),
                          hide_index=True, height=35 * (len(lineup) + 1) + 3)
 
         stream_planner(v, team, il, cats, teams, roster, max_adds, moves, names.get(my_team) if synced else None)
@@ -705,8 +707,8 @@ with tab_match:
             tbl.loc[c, "Them so far"] = opp_row[m] / opp_row[a] if opp_row[a] else None
         pct = tbl.index.isin(["FG%", "FT%"])
         st.dataframe(tbl.reset_index(names="Category").style
-                     .format({c: "{:.1f}" for c in ["Me so far", "Them so far", "Me projected", "Them projected"]}, na_rep="")
-                     .format({c: "{:.3f}" for c in ["Me so far", "Them so far", "Me projected", "Them projected"]},
+                     .format({c: "{:.2f}" for c in ["Me so far", "Them so far", "Me projected", "Them projected"]}, na_rep="")
+                     .format({c: "{:.2%}" for c in ["Me so far", "Them so far", "Me projected", "Them projected"]},
                              subset=pd.IndexSlice[pct, :], na_rep="")
                      .format({"Win %": "{:.0%}"})
                      .apply(lambda col: [shade((x - 0.5) * 2) for x in col], subset=["Win %"]),
