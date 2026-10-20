@@ -1,5 +1,6 @@
 """NBA Fantasy Hub: draft board, team view and waiver helper. Run: streamlit run app.py"""
 import hashlib
+import importlib
 from pathlib import Path
 
 import pandas as pd
@@ -7,6 +8,10 @@ import streamlit as st
 
 import espn
 import model
+
+# A deploy can update app.py while the server keeps the old espn/model modules loaded (AttributeError on a new
+# function). Reloading them each run costs milliseconds and guarantees the code on disk is the code that runs.
+espn, model = importlib.reload(espn), importlib.reload(model)
 
 st.set_page_config(page_title="NBA Fantasy Hub", page_icon="🏀", layout="wide")
 # Streamlit's default ~6rem top padding wastes board space; keep just enough to clear the toolbar
