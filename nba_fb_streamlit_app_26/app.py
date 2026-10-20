@@ -190,7 +190,7 @@ def fits(pos, slot):
 
 def daily_starts(roster_ids, gl, pgv, pos):
     """Daily lineups: each remaining day, fill the active slots from the roster players with a game that day, best
-    per-game value first, each into the narrowest open slot he qualifies for. Returns the (id, date) games started.
+    per-game value first, each into the narrowest open slot he qualifies for. Returns (id, date, slot) per start.
     ponytail: greedy per day, can misplace a dual-eligible player; an assignment solver if it matters."""
     started = []
     narrow = sorted(SLOTS, key=lambda sl: len(SLOT_OK.get(sl, {sl})))
@@ -200,13 +200,13 @@ def daily_starts(roster_ids, gl, pgv, pos):
             slot = next((sl for sl in open_slots if fits(pos.get(i), sl)), None)
             if slot is not None:
                 open_slots.remove(slot)
-                started.append((i, date))
+                started.append((i, date, slot))
     return started
 
 
 def started_value(roster_ids, gl, pgv, pos):
     """Expected value of the games a roster would actually start the rest of the week."""
-    return sum(pgv.get(i, 0) for i, _ in daily_starts(roster_ids, gl, pgv, pos)) * model.P_PLAY
+    return sum(pgv.get(i, 0) for i, _, _ in daily_starts(roster_ids, gl, pgv, pos)) * model.P_PLAY
 
 
 @st.cache_data(show_spinner=False)
@@ -530,7 +530,7 @@ with tab_team:
             # box scores so far this week + the remaining games your daily lineups would start (IL slots don't score)
             per, pgv, gl = week_plan_inputs(tuple(cats), int(teams * roster), d["updated"], CODE)
             active = set(team.index) - il
-            starts = pd.DataFrame(daily_starts(active, gl, pgv.to_dict(), v.pos.to_dict()), columns=["id", "date"])
+            starts = pd.DataFrame(daily_starts(active, gl, pgv.to_dict(), v.pos.to_dict()), columns=["id", "date", "slot"])
             g = d["games"]
             week_day1 = (this_week()[0] - pd.to_datetime(d["schedule"].date).min()).days + 1  # Monday's season day
             played = g[g.id.isin(active) & (g.day >= week_day1)]
@@ -545,30 +545,56 @@ with tab_team:
         team = v[v.Mine]
 
         team = v[v.Mine]
-        _, pgv, gl = week_plan_inputs(tuple(cats), int(teams * roster), d["updated"], CODE)
+        per, pgv, gl = week_plan_inputs(tuple(cats), int(teams * roster), d["updated"], CODE)
         ws, we = this_week()
-        starts = set(daily_starts(set(team.index) - il, gl, pgv.to_dict(), v.pos.to_dict()))
-        days = sorted(gl.date.unique())
-        st.subheader(f"Daily lineup: rest of the week of {ws:%b %d} - {we:%b %d}")
-        st.caption("Lineups are set each day: your best players with a game that day fill the active spots (by "
-                   "position); the rest of that day's players sit. Blank = no game, or injured.")
-        if not days:
-            st.info("No games left this week.")
+        starts = pd.DataFrame(daily_starts(set(team.index) - il, gl, pgv.to_dict(), v.pos.to_dict()),
+                              columns=["id", "date", "slot"])
+        st.subheader("Daily lineup")
+        today = pd.Timestamp.now(tz="America/New_York").tz_localize(None).normalize()
+        week_days = {f"{ws + pd.Timedelta(days=k):%a %m/%d}": ws + pd.Timedelta(days=k) for k in range(7)}
+        pick = st.segmented_control("Day", list(week_days), key="lineup_day",
+                                    default=next((k for k, dt in week_days.items() if dt == today), list(week_days)[0]))
+        day = week_days.get(pick or "", today)
+        stat_cols = ["PTS", "REB", "AST", "STL", "BLK", "3PM", "TO"]
+        if day < today:  # done: what your players actually did
+            g = d["games"]
+            box = g[g.id.isin(team.index) & (g.day == (day - pd.to_datetime(d["schedule"].date).min()).days + 1)]
+            if box.empty:
+                st.info(f"None of your players played on {day:%A}.")
+            else:
+                box = box.assign(Player=box.id.map(team.name), MIN=box.MPG,
+                                 **{"FG": box.FGM.astype(int).astype(str) + "-" + box.FGA.astype(int).astype(str),
+                                    "FT": box.FTM.astype(int).astype(str) + "-" + box.FTA.astype(int).astype(str)})
+                st.caption(f"{day:%A}: box scores (every game your players played, started or not).")
+                st.dataframe(box[["Player", "MIN", *stat_cols, "FG", "FT"]], hide_index=True,
+                             column_config={c: st.column_config.NumberColumn(format="%.0f") for c in ["MIN", *stat_cols]})
         else:
-            mine_gl = set(zip(gl.id, gl.date))
-            grid = pd.DataFrame({"Player": team.name, "Slot": ["IL" if i in il else "" for i in team.index]},
-                                index=team.index)
-            for dt in days:
-                grid[f"{pd.Timestamp(dt):%a %m/%d}"] = ["START" if (i, dt) in starts else "bench" if (i, dt) in mine_gl
-                                                        else "" for i in team.index]
-            grid["Starts"] = [sum((i, dt) in starts for dt in days) for i in team.index]
-            grid = grid.loc[team.sort_values("value", ascending=False).index]
-            st.dataframe(grid.style.map(lambda x: "background-color: rgba(34,160,80,0.35)" if x == "START" else
-                                        "color: #999" if x == "bench" else "", subset=list(grid.columns[2:-1])),
-                         hide_index=True)
-            open_ = {dt: len(SLOTS) - sum(1 for _, d2 in starts if d2 == dt) for dt in days}
-            st.caption("Open active spots by day: " + ", ".join(f"{pd.Timestamp(dt):%a} {n}" for dt, n in open_.items()) +
-                       ". Streamers help most on days with open spots.")
+            on = starts[starts.date == day]
+            playing = set(gl.id[(gl.date == day) & gl.id.isin(team.index)])
+            team_plays = set(d["schedule"].team_id[pd.to_datetime(d["schedule"].date) == day])
+            rows = []
+            by_slot = {sl: list(on.id[on.slot == sl]) for sl in set(SLOTS)}
+            for slot in SLOTS:  # one row per active slot, in Yahoo's order (the 3 Util spots take turns)
+                pid = by_slot[slot].pop(0) if by_slot[slot] else None
+                rows.append({"Slot": slot, "Player": team.name.get(pid, "(empty)") if pid else "(empty)",
+                             **{c: per.loc[pid, c] if pid else None for c in stat_cols}})
+            started_ids = set(on.id)
+            order = ["BN (has a game)", "BN (injured)", "BN (no game)", "IL"]  # sitting with a game first
+            bench = []
+            for i in team.sort_values("value", ascending=False).index.difference(started_ids, sort=False):
+                note = ("IL" if i in il else "BN (has a game)" if i in playing else
+                        "BN (injured)" if v.team_id.get(i) in team_plays else "BN (no game)")
+                bench.append({"Slot": note, "Player": team.name[i],
+                              **{c: per.loc[i, c] if note == "BN (has a game)" else None for c in stat_cols}})
+            rows += sorted(bench, key=lambda r: order.index(r["Slot"]))
+            lineup = pd.DataFrame(rows)
+            st.caption(f"{day:%A}: start these {len(started_ids)}; best players with a game fill the active spots by "
+                       f"position. Stats are per-game projections. {len(SLOTS) - len(started_ids)} spot(s) open"
+                       + (" - a streamer with a game this day would start." if len(started_ids) < len(SLOTS) else "."))
+            st.dataframe(lineup.style.map(lambda x: "background-color: rgba(34,160,80,0.25)" if x in SLOTS else
+                                          "color: #999" if isinstance(x, str) and x.startswith(("BN (no", "IL", "BN (inj"))
+                                          else "", subset=["Slot"]).format({c: "{:.1f}" for c in stat_cols}, na_rep=""),
+                         hide_index=True, height=35 * (len(lineup) + 1) + 3)
 
         stream_planner(v, team, il, cats, teams, roster, max_adds, moves, names.get(my_team) if synced else None)
 

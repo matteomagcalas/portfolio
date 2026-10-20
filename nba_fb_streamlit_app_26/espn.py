@@ -1,5 +1,6 @@
 """ESPN data pulls. Finished seasons are cached forever; live data (projections,
 injuries, rosters, schedules) is re-pulled when older than MAX_AGE_HOURS."""
+import hashlib
 import re
 import time
 import unicodedata
@@ -157,7 +158,10 @@ def stale(mtime, now=None):
 def refresh(force=False):
     DATA.mkdir(exist_ok=True)
     stamp = DATA / "updated.txt"
-    if not force and stamp.exists() and (DATA / f"games_{SEASON}.csv").exists() and not stale(stamp.stat().st_mtime):
+    # data written by an older espn.py (e.g. before a date fix) is re-pulled, however fresh
+    version, vfile = hashlib.md5(Path(__file__).read_bytes()).hexdigest(), DATA / "version.txt"
+    same = vfile.exists() and vfile.read_text() == version
+    if not force and same and stamp.exists() and (DATA / f"games_{SEASON}.csv").exists() and not stale(stamp.stat().st_mtime):
         return
 
     history = DATA / "history.csv"  # finished seasons never change, pull once
@@ -217,6 +221,7 @@ def refresh(force=False):
     pd.DataFrame(inj, columns=["id", "status", "return_date", "season_out", "note"]).to_csv(DATA / "injuries.csv", index=False)
 
     stamp.write_text(datetime.now(timezone.utc).isoformat())
+    vfile.write_text(version)
 
 
 def load():
