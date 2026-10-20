@@ -139,7 +139,8 @@ def opportunity(cps, params):
         after = g[(g.day >= D) & (g.day < D + 14)]
         nxt = g[g.day >= D].sort_values("day").groupby("id").first().GS
         n = after.groupby("id").size()
-        f = pd.DataFrame({"promo": model.promotion(g, D, nxt, params["tau_m"]), "pred": p.MPG,
+        first = g.sort_values("day").groupby("id").GS.first()  # preseason role stand-in, as in prior_for
+        f = pd.DataFrame({"promo": model.promotion(g, D, nxt, params["tau_m"], first), "pred": p.MPG,
                           "y": after.groupby("id").MPG.mean(), "n": n}).dropna()
         rows.append(f[f.n >= 2].assign(season=T))
     df = pd.concat(rows).reset_index(drop=True)

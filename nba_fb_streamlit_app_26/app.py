@@ -26,6 +26,32 @@ def data(code):  # code: espn.py/model.py version, so a push never serves data l
     return espn.load()
 
 
+def this_week():
+    """Fantasy week Monday-Sunday, US Eastern."""
+    today = pd.Timestamp.now(tz="America/New_York").tz_localize(None).normalize()
+    start = today - pd.Timedelta(days=today.weekday())
+    return start, start + pd.Timedelta(days=6)
+
+
+@st.cache_data(show_spinner=False)
+def week_board(cats, pool_size, updated, code):
+    """This fantasy week's category TOTALS per player: box scores so far + expected remaining games x per-game
+    projection (with the starting-lineup minutes boost), valued like the season board but on the totals."""
+    d = data(code)
+    v = board(cats, pool_size, updated, code).reset_index()
+    boost = ((v.MPG + v.opp_min) / v.MPG).where(v.MPG > 0, 1)
+    per = v.assign(**{c: v[c] * boost for c in model.COUNT}, MPG=v.MPG + v.opp_min)
+    start, end = this_week()
+    wk = model.week(per, d["games"], d["schedule"], d["injuries"], d["players"], start, end,
+                    pd.to_datetime(d["schedule"].date).min())
+    # value on totals: GP 82 = no availability scaling (it's already in the totals); pool picked by total minutes
+    tot = wk.assign(GP=82.0, MPG=wk.MPG.fillna(0) * wk.GP).reset_index(names="id")
+    val = model.value(tot, list(cats), pool_size).set_index("id")
+    out = wk.join(val[[f"z_{c}" for c in cats] + ["value"]])
+    out["Rank"] = out.value.rank(ascending=False, method="first")
+    return out
+
+
 def season_day(d):
     """ESPN scoring period for today: 1 = opening night (the schedule's first date)."""
     opener = pd.to_datetime(d["schedule"].date).min()
@@ -59,7 +85,9 @@ def board(cats, pool_size, updated, code):  # code: model/espn version, so a pus
     out_now = set(d["injuries"].id[d["injuries"].status == "Out"])
     dc = d["depth"][~d["depth"].id.isin(out_now)].sort_values("slot")
     starter_now = pd.Series(1.0, index=dc.groupby(["team_id", "pos"]).id.first().unique())
-    promo = model.promotion(games, today, starter_now, model.IN_SEASON["tau_m"])
+    pre_start = pd.Series(1.0, index=d["preseason_depth"].query("slot == 0").id.unique())
+    pre_start = pre_start.reindex(pre.id).fillna(0)  # preseason role: starter or bench, worth 4 games
+    promo = model.promotion(games, today, starter_now, model.IN_SEASON["tau_m"], pre_start, model.IN_SEASON["Km"])
     proj["opp_min"] = (proj.id.map(promo).fillna(0) * model.OPP_MIN_PER_START).where(~proj.id.isin(out_now), 0)
     v = model.value(proj, list(cats), pool_size)
     inj = d["injuries"].drop_duplicates("id").set_index("id")
@@ -172,6 +200,9 @@ with st.sidebar:
                                index=list(names.index).index(int(st.query_params["team"]))
                                if st.query_params.get("team", "").isdigit() and int(st.query_params["team"]) in names.index else 0)
         st.query_params["team"] = str(my_team)
+        if st.button("Sync now", help="Pull rosters from Yahoo right away instead of waiting for the 10-minute refresh"):
+            league.clear()
+            st.rerun()
     fmt = st.selectbox("Format", list(model.CATS))
     teams = st.number_input("Teams", 4, 30, rosters.team_id.nunique() if rosters is not None and len(rosters) else 10)
     roster = st.number_input("Roster spots per team", 5, 20, 13)
@@ -248,6 +279,9 @@ FMT.update({"FG%": st.column_config.NumberColumn(format="%.3f"), "FT%": st.colum
                                                      help="Minutes per game gained (or lost) over the next 2 weeks from moving "
                                                           "into (out of) the starting lineup, beyond what his recent games show"),
             "gp_so_far": st.column_config.NumberColumn("GP so far", format="%.0f"),
+            "g_played": st.column_config.NumberColumn("Played", format="%.0f", help="Games played this week"),
+            "g_left": st.column_config.NumberColumn("Left", format="%.1f",
+                                                    help="Expected games left this week: healthy team games x play rate"),
             "PosRank": st.column_config.TextColumn("Pos Rk", help="Rank among players at their primary position group: G, F or C"),
             "name": "Player", "team": "Team", "pos": "Pos",
             "Photo": st.column_config.ImageColumn("", width=48),
@@ -272,6 +306,22 @@ else:
 m3.metric("Your picks", len(mine), f"{len(taken)} taken by others", delta_color="off", border=True)
 m4.metric("ESPN data", f"{ago:.0f}h ago" if ago >= 1 else "just now", "refreshes about every 6h",
           delta_color="off", border=True)
+# Season = rest-of-season per-game projection. This week = category totals for Mon-Sun: what's been played plus
+# what's projected for the games left (injury report, role changes), which is what wins 7 of 9 H2H categories.
+weekly = st.segmented_control(
+    "Stats shown", ["Season (per game)", "This week (totals)"], default="Season (per game)", key="stat_mode",
+    help="This week = box scores so far this week + projected remaining games. Updates as games are played, "
+         "injuries are reported and players move into or out of the starting lineup.") == "This week (totals)"
+vv = v
+if weekly:
+    wk = week_board(tuple(cats), int(teams * roster), d["updated"], CODE)
+    vv = v.copy()
+    wcols = [*model.COUNT, "FG%", "FT%", "MPG", "GP", "g_played", "g_left", *[f"z_{c}" for c in cats], "value", "Rank"]
+    vv[wcols] = wk[wcols].reindex(vv.index)
+    ws, we = this_week()
+    st.caption(f"Week of {ws:%b %d} - {we:%b %d}: totals = played so far + expected remaining games "
+               f"(each healthy game counts {model.P_PLAY:.0%}, the share rotation players actually play).")
+
 tab_draft, tab_team, tab_star, tab_waiver = st.tabs([":material/sports_basketball: Available Players",
                                                      ":material/groups: My team", ":material/star: Starred",
                                            ":material/swap_horiz: Waivers / pickups"])
@@ -290,7 +340,7 @@ with tab_draft:
                     del qp[k]
             st.session_state.resets = st.session_state.get("resets", 0) + 1  # drop the editor's remembered ticks
             st.rerun()
-    view = v
+    view = vv
     if hide:
         view = view[~view.Mine & ~view.Taken]
     if search:
@@ -301,18 +351,22 @@ with tab_draft:
         view = view[view.team.isin(nba_teams)]
     # preseason: market order; in season: our rest-of-season rank. Click a header to re-sort.
     view = view.sort_values("Rank") if in_season else view.sort_values(["adp", "Rank"], na_position="last")
+    if weekly:
+        view = view[view.GP > 0]  # no games this week = nothing to add
     st.caption(("Mine/Taken come from your Yahoo league (re-synced every 10 minutes). " if synced else
                 "Tick **Mine** for your picks and **Taken** for everyone else's. ") +
                f"{len(mine)} mine, {len(taken)} taken by others. Category colors: green = helps you vs. the "
                f"draftable pool, red = hurts (FG%/FT% weighted by attempts, high TO is red).")
-    cols = (["Star", "Mine", "Taken", "Rank", "RankChg", "PreRank", "PosRank", "name", "team", "pos", "age", "value",
+    cols = (["Star", "Mine", "Taken", "Rank", "name", "team", "pos", "value", "g_played", "g_left", "MPG",
+             *[c for c in STAT_COLS if c not in ("GP", "MPG")], "Injury"] if weekly else
+            ["Star", "Mine", "Taken", "Rank", "RankChg", "PreRank", "PosRank", "name", "team", "pos", "age", "value",
              "gp_so_far", *STAT_COLS, "Injury"] if in_season else
             ["Star", "Mine", "Taken", "adp", "Rank", "ADPval", "PosRank", "name", "team", "pos", "age", "value",
              *STAT_COLS, "Injury"])
     # The key follows the rows shown (not the picks), so a tick keeps the same editor and your scroll spot,
     # and edits never replay onto different rows after a filter change.
     st.session_state.star_draft_ids = list(view.index[:400])
-    edited = st.data_editor(view[cols].head(400).style.apply(board_style, z=v, cats=cats, axis=None), hide_index=True,
+    edited = st.data_editor(view[cols].head(400).style.apply(board_style, z=vv, cats=cats, axis=None), hide_index=True,
                             height=650, column_config={**FMT, "Star": star_col("star_draft")}, disabled=[c for c in cols if c not in (("Star",) if synced else ("Star", "Mine", "Taken"))],
                             key=f"ed-{hash((tuple(view.index[:400]), st.session_state.get('resets', 0)))}")
     if nba_teams and len(view):
@@ -336,7 +390,7 @@ with tab_draft:
         st.rerun()
 
 with tab_star:
-    fav = v[v.Star == "⭐"]
+    fav = vv[vv.Star == "⭐"]
     if fav.empty:
         st.info("Click the ☆ next to a player on the Available Players tab to star them.")
     else:
@@ -350,18 +404,31 @@ with tab_star:
                      hide_index=True, column_config={**FMT, "Star": star_col("star_tab")})
 
 with tab_team:
-    team = v[v.Mine]
+    team = vv[vv.Mine]
     if team.empty:
         st.info("Tick **Mine** on the Available Players tab to build your team.")
     else:
-        st.subheader("Category strength")
-        st.caption("Sum of your players' z-scores per category. Positive = above an average team's pace.")
-        avg_team = v.head(int(teams * roster))[[f"z_{c}" for c in cats]].sum() / teams
+        st.subheader("Category strength" + (" this week" if weekly else ""))
+        st.caption("Sum of your players' z-scores per category" + (" on this week's totals" if weekly else "") +
+                   ". Positive = above an average team's pace.")
+        avg_team = vv.sort_values("Rank").head(int(teams * roster))[[f"z_{c}" for c in cats]].sum() / teams
         strength = team[[f"z_{c}" for c in cats]].sum() - avg_team * len(team) / roster
         for col, c in zip(st.columns(len(cats)), cats):
             col.metric(c, f"{strength[f'z_{c}']:+.1f}")
-        st.dataframe(team[["Rank", "PosRank", "Photo", "name", "Logo", "team", "pos", "value", *STAT_COLS, "Injury"]]
-                     .style.apply(board_style, z=v, cats=cats, axis=None), hide_index=True, column_config=FMT)
+        tcols = (["Rank", "Photo", "name", "Logo", "team", "pos", "value", "g_played", "g_left", "MPG",
+                  *[c for c in STAT_COLS if c not in ("GP", "MPG")], "Injury"] if weekly else
+                 ["Rank", "PosRank", "Photo", "name", "Logo", "team", "pos", "value", *STAT_COLS, "Injury"])
+        st.dataframe(team.sort_values("Rank")[tcols].style.apply(board_style, z=vv, cats=cats, axis=None),
+                     hide_index=True, column_config=FMT)
+        if weekly:
+            act = team[~team.index.isin(il)]  # IL slots don't score
+            tot = {c: act[c].sum() for c in ["PTS", "REB", "AST", "STL", "BLK", "3PM", "TO"]}
+            tot["FG%"], tot["FT%"] = act.FGM.sum() / act.FGA.sum(), act.FTM.sum() / act.FTA.sum()
+            st.dataframe(pd.DataFrame([{"name": f"Team total ({len(act)} players, IL excluded)", **tot}]),
+                         hide_index=True, column_config=FMT)
+            st.caption("Assumes every non-IL player's games count. With more players than lineup spots on a busy "
+                       "night, some bench games won't, so the real total runs a little lower.")
+        team = v[v.Mine]
 
         # Fantasy week = Monday-Sunday; before opening night, use the opening week.
         start = max(pd.Timestamp.now().normalize(), pd.to_datetime(d["schedule"].date).min())
@@ -426,43 +493,43 @@ with tab_waiver:
         show = f3.number_input("Players shown", 10, 500, 100, step=10)
         if team_filter:
             fa = fa[fa.team.isin(team_filter)]
-        num = ["Upgrade", "value", *(["opp_min"] if in_season else []), *[f"Δ{c}" for c in cats]]
-        st.dataframe(fa[["Photo", "name", "Logo", "team", "pos", "Upgrade", "value", *(["RankChg", "opp_min"] if in_season else []),
+        num = ["Upgrade", "value", "opp_min", *[f"Δ{c}" for c in cats]]
+        st.dataframe(fa[["Photo", "name", "Logo", "team", "pos", "Upgrade", "value", *(["RankChg"] if in_season else []), "opp_min",
                          *[f"Δ{c}" for c in cats], "Injury"]].head(show).style
                      .apply(lambda col: col.map(injury_badge), subset=["Injury"])
                      .apply(lambda col: (col / 3).map(shade), subset=["Upgrade"])
                      .format("{:+.2f}", subset=[c for c in num if c != "value"]).format("{:.2f}", subset=["value"])
                      .format("{:+.0f}", subset=["RankChg"] if in_season else []),
                      hide_index=True, column_config=FMT, height=600)
-        if in_season:
-            st.subheader("Minutes opening up: next 2 weeks")
-            st.caption("Free agents moving into the starting lineup (ESPN depth chart, injured players skipped) who mostly came "
-                       "off the bench lately. Backtest: these players average about 4 more minutes over the next 2 weeks than "
-                       "their recent games suggest. Valued over their games in the next 14 days; often short-term streamers.")
-            today = pd.Timestamp.now(tz="America/New_York").tz_localize(None).normalize()
-            nxt = v[~v.Mine & ~v.Taken & (v.opp_min >= 2) & (v.MPG > 0)].reset_index()  # 2+ = at least half a start-share
-            if nxt.empty:
-                st.info("No free agent is picking up meaningful minutes from injuries right now.")
-            else:
-                boost = (nxt.MPG + nxt.opp_min) / nxt.MPG
-                nxt[model.COUNT] = nxt[model.COUNT].mul(boost, axis=0)
-                nxt["MPG"] = nxt.MPG + nxt.opp_min
-                nxt["wk2"] = model.games_between(nxt.id, d["injuries"], d["schedule"], d["players"], today,
-                                                 today + pd.Timedelta(days=13)).values
-                nxt["GP"] = nxt.health * nxt.wk2
-                allv = model.value(pd.concat([v[~v.index.isin(nxt.id)].reset_index(), nxt]), list(cats),
-                                   int(teams * roster)).set_index("id")
-                nxt = allv.loc[nxt.id]
-                nxt["pg_rank"] = nxt.value_pg.map(lambda x: int((allv.value_pg > x).sum()) + 1)
-                nxt = nxt.sort_values("value", ascending=False).head(50)
-                st.dataframe(nxt[["name", "team", "pos", "opp_min", "MPG", "wk2", "pg_rank", *[c for c in STAT_COLS if c not in ("GP", "MPG")], "Injury"]],
-                             hide_index=True, column_config={**FMT, "wk2": st.column_config.NumberColumn("Games (2 wk)"),
-                                                             "MPG": st.column_config.NumberColumn("MPG (boosted)", format="%.2f"),
-                                                             "opp_min": st.column_config.NumberColumn("+Min (role)", format="%+.2f"),
-                                                             **{c: st.column_config.NumberColumn(format="%.2f") for c in STAT_COLS
-                                                                if c not in ("GP", "MPG", "FG%", "FT%")},
-                                                             "pg_rank": st.column_config.NumberColumn("Per-game rank", help="Where his per-game "
-                                                                 "line while starting would rank among all players")})
+        # works from opening night: role = depth chart vs. preseason role until games pile up
+        st.subheader("Minutes opening up: next 2 weeks")
+        st.caption("Free agents moving into the starting lineup (ESPN depth chart, injured players skipped) who mostly came "
+                   "off the bench lately. Backtest: these players average about 4.7 more minutes over the next 2 weeks than "
+                   "their recent games suggest. Valued over their games in the next 14 days; often short-term streamers.")
+        today = pd.Timestamp.now(tz="America/New_York").tz_localize(None).normalize()
+        nxt = v[~v.Mine & ~v.Taken & (v.opp_min >= 2) & (v.MPG > 0)].reset_index()  # 2+ = at least half a start-share
+        if nxt.empty:
+            st.info("No free agent is moving into a starting lineup right now.")
+        else:
+            boost = (nxt.MPG + nxt.opp_min) / nxt.MPG
+            nxt[model.COUNT] = nxt[model.COUNT].mul(boost, axis=0)
+            nxt["MPG"] = nxt.MPG + nxt.opp_min
+            nxt["wk2"] = model.games_between(nxt.id, d["injuries"], d["schedule"], d["players"], today,
+                                             today + pd.Timedelta(days=13)).values
+            nxt["GP"] = nxt.health * nxt.wk2
+            allv = model.value(pd.concat([v[~v.index.isin(nxt.id)].reset_index(), nxt]), list(cats),
+                               int(teams * roster)).set_index("id")
+            nxt = allv.loc[nxt.id]
+            nxt["pg_rank"] = nxt.value_pg.map(lambda x: int((allv.value_pg > x).sum()) + 1)
+            nxt = nxt.sort_values("value", ascending=False).head(50)
+            st.dataframe(nxt[["name", "team", "pos", "opp_min", "MPG", "wk2", "pg_rank", *[c for c in STAT_COLS if c not in ("GP", "MPG")], "Injury"]],
+                         hide_index=True, column_config={**FMT, "wk2": st.column_config.NumberColumn("Games (2 wk)"),
+                                                         "MPG": st.column_config.NumberColumn("MPG (boosted)", format="%.2f"),
+                                                         "opp_min": st.column_config.NumberColumn("+Min (role)", format="%+.2f"),
+                                                         **{c: st.column_config.NumberColumn(format="%.2f") for c in STAT_COLS
+                                                            if c not in ("GP", "MPG", "FG%", "FT%")},
+                                                         "pg_rank": st.column_config.NumberColumn("Per-game rank", help="Where his per-game "
+                                                             "line while starting would rank among all players")})
     if moves is not None and len(moves):
         with st.expander(f"Recent league moves ({len(moves)})"):
             st.dataframe(moves.assign(time=moves.time.dt.strftime("%b %d %I:%M %p")), hide_index=True)

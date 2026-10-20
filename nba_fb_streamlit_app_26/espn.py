@@ -68,7 +68,9 @@ def games(season):
     f = DATA / f"games_{season}.csv"
     if not f.exists():
         _game_rows(_players(season), season).to_csv(f, index=False)
-    return pd.read_csv(f)
+    # explicit dtypes: before opening night the file is just a header, which pandas would read as text
+    return pd.read_csv(f, dtype={"id": "int64", "day": "int64", "team_id": "int64",
+                                 **{n: "float64" for n in STAT.values() if n != "GP"}})
 
 
 YAHOO = ("https://pub-api-rw.fantasysports.yahoo.com/fantasy/v2/game/nba/players;sort=DA_AP;start={};count=50;"
@@ -165,7 +167,9 @@ def refresh(force=False):
         for a in _get(f"{SITE}/teams/{tid}/roster")["athletes"]:
             ages[int(a["id"])] = a.get("age")
         for g in _get(f"{SITE}/teams/{tid}/schedule", params={"season": SEASON, "seasontype": 2}).get("events", []):
-            games.append({"team_id": tid, "date": g["date"][:10]})
+            # ESPN gives UTC; a 10 pm ET tip is the next day in UTC. Fantasy days are US Eastern.
+            et = pd.Timestamp(g["date"]).tz_convert("America/New_York")
+            games.append({"team_id": tid, "date": f"{et:%Y-%m-%d}"})
     pd.DataFrame(games).to_csv(DATA / "schedule.csv", index=False)
     pd.DataFrame(depth, columns=["id", "team_id", "pos", "slot"]).to_csv(DATA / "depth.csv", index=False)
 
@@ -210,8 +214,9 @@ def load():
         "injuries": pd.read_csv(DATA / "injuries.csv"),
         "schedule": pd.read_csv(DATA / "schedule.csv"),
         "depth": pd.read_csv(DATA / "depth.csv"),
-        "games": pd.read_csv(DATA / f"games_{SEASON}.csv"),
+        "games": games(SEASON),
         "preseason": pd.read_csv(DATA / "preseason.csv"),  # frozen before opening night: the in-season prior
+        "preseason_depth": pd.read_csv(DATA / "preseason_depth.csv"),
         "updated": (DATA / "updated.txt").read_text(),
     }
 

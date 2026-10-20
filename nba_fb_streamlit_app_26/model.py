@@ -275,10 +275,10 @@ IN_SEASON = dict(K={"PTS": 200, "REB": 1e12, "AST": 400, "STL": 1e12, "BLK": 400
 
 
 # Next-2-week MPG change per unit of promotion(): fit on 2023-24..2025-26 checkpoints, "starting now" = started his
-# team's next game. Held out 2023-24/24-25/25-26: 4.2/4.6/4.8; next-2-week minutes error for role changers
-# 6.71/6.15/5.88 -> 5.38/5.00/4.90 (everyone 4.69/4.62/4.61 -> 4.48/4.44/4.46). All three seasons: 4.53.
-# (Tried first: minutes vacated by injured teammates. Spread over the whole bench it moved anyone by ~0, no gain.)
-OPP_MIN_PER_START = 4.5
+# team's next game, preseason role = started his first game. Held out 2023-24/24-25/25-26: 4.4/4.8/5.1; next-2-week
+# minutes error for role changers 6.58/6.15/5.82 -> 5.02/4.80/4.71 (everyone 4.72/4.65/4.67 -> 4.45/4.44/4.49).
+# All three seasons: 4.73. (Tried first: minutes vacated by injured teammates; spread over the bench it gave ~0.)
+OPP_MIN_PER_START = 4.7
 
 
 def in_season(prior, games, today, K, tau, Km, tau_m, Kh, new_mpg):
@@ -327,14 +327,52 @@ def in_season(prior, games, today, K, tau, Km, tau_m, Kh, new_mpg):
     return out.reset_index(names="id")
 
 
-def promotion(games, today, starter_now, tau_m):
+def promotion(games, today, starter_now, tau_m, prior_start=None, k=4):
     """Starting now (1/0) minus his recent share of starts, weighted like the minutes blend: + = bench player
     moving into the lineup (injury ahead of him, trade, coach's call), - = starter moving to the bench.
-    Times OPP_MIN_PER_START = extra (or lost) MPG expected over the next 2 weeks."""
+    prior_start: preseason starter flag, worth k games (the minutes prior's weight), so a role change shows
+    from opening night instead of waiting for games. Times OPP_MIN_PER_START = MPG change for the next 2 weeks."""
     g = games[games.day < today].astype({"day": float, "GS": float})
     w = np.exp(-(today - g.day) / tau_m)
-    recent = (g.GS * w).groupby(g.id).sum() / w.groupby(g.id).sum()
-    return (starter_now.reindex(recent.index).fillna(0) - recent).rename("promo")
+    ids = g.id.unique() if prior_start is None else pd.Index(g.id.unique()).union(prior_start.index)
+    s0 = (prior_start if prior_start is not None else pd.Series(dtype=float)).reindex(ids)
+    num, den = (g.GS * w).groupby(g.id).sum().reindex(ids).fillna(0), w.groupby(g.id).sum().reindex(ids).fillna(0)
+    recent = ((k * s0).fillna(0) + num) / (k * s0.notna() + den)
+    return (starter_now.reindex(recent.index).fillna(0) - recent).dropna().rename("promo")
+
+
+# Share of his team's games a rotation player who played the last one plays over the next 7 days (game logs:
+# 0.900 / 0.884 / 0.881 in 2023-24 / 24-25 / 25-26). Rest days, new knocks: the injury report covers the rest.
+P_PLAY = 0.89
+
+
+def week(proj, games, schedule, injuries, players, start, end, opener):
+    """Projected category TOTALS for a fantasy week [start, end]: what each player already did this week plus,
+    for each of his team's games not yet in the box scores, P_PLAY x his per-game projection (proj, which
+    should include any role boost). Games before an injury return date don't count; out with no date or
+    for the season = no more games. FG%/FT% from the summed makes and attempts."""
+    day = lambda ts: (pd.Timestamp(ts) - opener).days + 1
+    g = games.astype({"day": float})
+    played = g[(g.day >= day(start)) & (g.day <= day(end))]
+    p = proj.set_index("id") if "id" in proj else proj
+    actual = played.groupby("id")[COUNT + ["MPG"]].sum().reindex(p.index).fillna(0)
+    sched = schedule.assign(day=pd.to_datetime(schedule.date).map(day))
+    sched = sched[(sched.day >= day(start)) & (sched.day <= day(end))]
+    logged = g.groupby("team_id").day.max()  # a game counts as played once its box score is in
+    sched = sched[sched.day > sched.team_id.map(logged).fillna(-1)]
+    team = players.set_index("id").team_id.reindex(p.index)
+    inj = injuries.drop_duplicates("id").set_index("id").reindex(p.index)
+    ret = pd.to_datetime(inj.return_date).map(lambda r: day(r) if pd.notna(r) else None)
+    done = inj.season_out.fillna(False).astype(bool) | ((inj.status == "Out") & ret.isna())
+    left = pd.Series([0 if dn else int(((sched.team_id == t) & (sched.day >= (r if pd.notna(r) else 0))).sum())
+                      for t, r, dn in zip(team, ret, done)], index=p.index) * P_PLAY
+    out = actual[COUNT].add(p[COUNT].fillna(0).mul(left, axis=0))
+    out["g_played"] = played.groupby("id").size().reindex(p.index).fillna(0)
+    out["g_left"] = left
+    out["GP"] = out.g_played + out.g_left
+    out["MPG"] = (actual.MPG + p.MPG.fillna(0) * left) / out.GP.where(out.GP > 0)
+    out["FG%"], out["FT%"] = out.FGM / out.FGA, out.FTM / out.FTA
+    return out
 
 
 def _games_left(ids, injuries, schedule, players, today):
