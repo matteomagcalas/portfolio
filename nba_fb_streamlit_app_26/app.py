@@ -599,8 +599,8 @@ with tab_team:
             lineup = pd.concat([lineup[~bn], lineup[bn].sort_values("Today", key=lambda t: t.map(
                 {"plays": 0, "injured": 1, "no game": 2, "IL": 3}), kind="stable")])
             n_open = len(SLOTS) - len(started_ids)
-            st.caption(f"{day:%A}: {len(started_ids)} of your players {'plays' if len(started_ids) == 1 else 'play'} "
-                       "and fill the green spots (best first, by position). Stats are per-game projections." +
+            st.caption(f"{day:%A}: {len(started_ids)} of your players {'plays and fills' if len(started_ids) == 1 else 'play and fill'} "
+                       "the green spots (best first, by position). Stats are per-game projections." +
                        (f" {n_open} spot(s) have nobody playing: a streamer with a game this day would start there."
                         if n_open else ""))
             green = lineup.Today.eq("plays") & ~lineup.Slot.isin(["BN", "IL"])
