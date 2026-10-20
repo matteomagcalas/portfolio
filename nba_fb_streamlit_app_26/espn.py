@@ -164,6 +164,26 @@ def yahoo_league(league_id):
             pd.DataFrame(board))
 
 
+def yahoo_lineups(league_id, team_ids, dates):
+    """Who each team has in which slot on each date (Yahoo carries a set lineup forward to future days):
+    rows team_id, date, key (normalized name), slot (PG..Util, BN, IL, IL+)."""
+    h = {"User-Agent": "Mozilla/5.0"}
+    base = "https://pub-api-rw.fantasysports.yahoo.com/fantasy/v2/league/nba.l.{}".format(league_id)
+    game = _get(f"{base}?format=json", headers=h)["fantasy_content"]["league"][0]["league_key"].split(".")[0]
+    keys = ",".join(f"{game}.l.{league_id}.t.{t}" for t in team_ids)
+    rows = []
+    for dt in dates:
+        teams = _get(f"{base}/teams;team_keys={keys}/roster;date={dt}?format=json", headers=h)["fantasy_content"]["league"][1]["teams"]
+        for k in range(teams["count"]):
+            t = teams[str(k)]["team"]
+            ps = t[1]["roster"]["0"]["players"]
+            for j in range(ps.get("count", 0) if isinstance(ps, dict) else 0):
+                p = ps[str(j)]["player"]
+                rows.append({"team_id": int(_flat(t[0])["team_id"]), "date": dt, "key": _norm(_flat(p[0])["name"]["full"]),
+                             "slot": _flat(p[1]["selected_position"]).get("position", "")})
+    return pd.DataFrame(rows, columns=["team_id", "date", "key", "slot"])
+
+
 def _players(season):
     return _get(FANTASY.format(season), headers={"X-Fantasy-Filter": FILTER})["players"]
 

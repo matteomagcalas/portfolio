@@ -207,6 +207,34 @@ def daily_starts(roster_ids, gl, pgv, pos):
     return started
 
 
+def assign(ids, pos):
+    """A legal slot for each active player ({id: slot}), or None if they can't all fit (backtracking over 10 slots)."""
+    ids = sorted(ids, key=lambda i: sum(fits(pos.get(i), sl) for sl in set(SLOTS)))  # pickiest first
+    if len(ids) > len(SLOTS):
+        return None
+    free, out = list(SLOTS), {}
+
+    def go(k):
+        if k == len(ids):
+            return True
+        tried = set()
+        for j, sl in enumerate(free):
+            if sl and sl not in tried and fits(pos.get(ids[k]), sl):
+                tried.add(sl)
+                free[j], out[ids[k]] = None, sl
+                if go(k + 1):
+                    return True
+                free[j] = sl
+        return False
+
+    return out if go(0) else None
+
+
+@st.cache_data(ttl=600, show_spinner=False)
+def yahoo_lineups(league_id, team_ids, dates, code):
+    return espn.yahoo_lineups(league_id, list(team_ids), list(dates))
+
+
 def by_date(gl):
     """(id, date) game rows -> {date: [ids playing that day]}."""
     return {dt: list(g.id) for dt, g in gl.groupby("date")}
@@ -240,9 +268,12 @@ def adds_used(moves, my_name, since):
 
 
 @st.cache_data(show_spinner="Working out your matchup...")
-def matchup_plan(my_ids, opp_ids, fa_ids, banked, banked_opp, cats, today, updated, code, pool_size, give, season_value):
+def matchup_plan(my_ids, opp_ids, fa_ids, banked, banked_opp, cats, today, updated, code, pool_size, give, season_value,
+                 my_lineup=(), opp_lineup=()):
     """Win chance now, and how each start/bench switch and each add/drop would change it. Rosters as tuples of ids.
-    Remaining games = the ones each side's daily lineup would start (best players with a game, by position)."""
+    Remaining games = the ones each side has set to start in Yahoo (my_lineup / opp_lineup: ((date, active ids), ...));
+    days without a Yahoo lineup use the recommended one (best players with a game, by position). Start advice is
+    relative to your Yahoo lineup; add advice compares recommended lineups with and without the add."""
     per, pgv, gl = week_plan_inputs(cats, pool_size, updated, code)
     v = board(cats, pool_size, updated, code)
     pgv, pos = pgv.to_dict(), v.pos.to_dict()
@@ -256,19 +287,26 @@ def matchup_plan(my_ids, opp_ids, fa_ids, banked, banked_opp, cats, today, updat
         return model.week_odds(banked, [vec.get(i, zero) for i, _, _ in starts],
                                banked_opp, [vec.get(i, zero) for i, _, _ in opp_starts], list(cats))
 
-    opp_starts = daily_starts(set(opp_ids), days, pgv, pos)
-    starts = daily_starts(set(my_ids), days, pgv, pos)
+    def as_set(ids, lineup):  # Yahoo lineups where known, recommended for the other days
+        known = {dt: set(a) for dt, a in lineup}
+        rec = [x for x in daily_starts(set(ids), days, pgv, pos) if x[1] not in known]
+        return rec + [(i, dt, None) for dt, a in known.items() for i in a if i in days.get(dt, ())], known
+
+    opp_starts, _ = as_set(opp_ids, opp_lineup)
+    starts, known = as_set(my_ids, my_lineup)
     base, p0 = odds(starts, opp_starts)
+    rec_starts = daily_starts(set(my_ids), days, pgv, pos)
+    _, p_rec = odds(rec_starts, opp_starts)
     moves = []
-    # start/bench: put a benched player with a game into a starter's spot that day
-    playing = gl[gl.id.isin(my_ids)]
-    started = {(i, dt) for i, dt, _ in starts}
-    for i, dt, slot in starts:
-        for j in playing.id[playing.date == dt]:
-            if (j, dt) not in started and fits(pos.get(j), slot):
-                alt = [(j, dt, slot) if (a, b) == (i, dt) else (a, b, c) for a, b, c in starts]
-                o, p = odds(alt, opp_starts)
-                moves.append({"kind": "start", "date": dt, "in": j, "out": i, "p": p, "cats": o.p_win - base.p_win})
+    # start/bench vs. your Yahoo lineup: a player with a game in for an active one (who may have no game), when every
+    # slot can still be filled legally
+    for dt, act in known.items():
+        for x in set(days.get(dt, ())) & (set(my_ids) - act):
+            for y in act:
+                if assign((act - {y}) | {x}, pos) is not None:
+                    alt = [z for z in starts if z[:2] != (y, dt)] + [(x, dt, None)]
+                    o, p = odds(alt, opp_starts)
+                    moves.append({"kind": "start", "date": dt, "in": x, "out": y, "p": p, "cats": o.p_win - base.p_win})
     # add/drop: free agents with games left, swapped for anyone on your active roster
     left = gl.groupby("id").size()
     fas = [f for f in fa_ids if f in left.index]
@@ -279,8 +317,9 @@ def matchup_plan(my_ids, opp_ids, fa_ids, banked, banked_opp, cats, today, updat
                 continue
             roster = (set(my_ids) - {dp}) | {fa}
             o, p = odds(daily_starts(roster, days, pgv, pos), opp_starts)
-            moves.append({"kind": "add", "date": None, "in": fa, "out": dp, "p": p, "cats": o.p_win - base.p_win})
-    return base, p0, pd.DataFrame(moves), starts, opp_starts
+            moves.append({"kind": "add", "date": None, "in": fa, "out": dp, "p": p - p_rec + p0,
+                          "cats": o.p_win - base.p_win})  # add's own effect, on top of your current chance
+    return base, p0, pd.DataFrame(moves), starts, opp_starts, p_rec
 
 
 def stream_planner(v, team, il, cats, teams, roster, max_adds, moves, my_name):
@@ -364,6 +403,7 @@ with st.sidebar:
         st.query_params["team"] = str(my_team)
         if st.button("Sync now", help="Pull rosters from Yahoo right away instead of waiting for the 10-minute refresh"):
             league.clear()
+            yahoo_lineups.clear()
             st.rerun()
     fmt = st.selectbox("Format", list(model.CATS))
     teams = st.number_input("Teams", 4, 30, rosters.team_id.nunique() if rosters is not None and len(rosters) else 10)
@@ -400,6 +440,39 @@ if synced:  # Yahoo is the source of truth: rosters already include every waiver
     unmatched = rosters.name[rosters.id.isna()]
     if len(unmatched):
         st.sidebar.caption("Not on the board (can't project): " + ", ".join(unmatched))
+ylineups = None  # your (and your opponent's) Yahoo lineups for the rest of the week: id, team_id, date, slot
+if synced:
+    _today = pd.Timestamp.now(tz="America/New_York").tz_localize(None).normalize()
+    _ws, _we = this_week()
+    _teams = (my_team,)
+    if scoreboard is not None and my_team in set(scoreboard.team_id):
+        _teams += (int(scoreboard.opp_id[scoreboard.team_id == my_team].iloc[0]),)
+    try:
+        _yl = yahoo_lineups(league_id, _teams, tuple(f"{dt:%Y-%m-%d}" for dt in pd.date_range(max(_today, _ws), _we)), CODE)
+        _yl["id"] = _yl.key.map(ids)
+        ylineups = _yl.dropna(subset=["id"]).astype({"id": int}).assign(date=lambda x: pd.to_datetime(x.date))
+    except Exception:
+        ylineups = None  # fall back to the app's recommended lineups
+
+
+def yahoo_day(team_id, day):
+    """{id: slot} that team has set in Yahoo for `day`, or None if unknown."""
+    if ylineups is None:
+        return None
+    r = ylineups[(ylineups.team_id == team_id) & (ylineups.date == day)]
+    return dict(zip(r.id, r.slot)) or None
+
+
+def yahoo_active(team_id, days):
+    """((date, (ids in active slots)), ...) for the days Yahoo has a lineup; hashable for caching."""
+    out = []
+    for dt in days:
+        yl = yahoo_day(team_id, dt)
+        if yl:
+            out.append((dt, tuple(sorted(i for i, sl in yl.items() if sl not in ("BN", "IL", "IL+")))))
+    return tuple(out)
+
+
 starred = {int(x) for x in qp.get("star", "").split(",") if x}
 v["Mine"], v["Taken"] = v.index.isin(mine), v.index.isin(taken)
 v["Star"] = v.index.map(lambda i: "⭐" if i in starred else "☆")
@@ -628,51 +701,86 @@ with tab_team:
                 st.dataframe(box[["Player", "MIN", *stat_cols, "FG", "FT"]], hide_index=True,
                              column_config={c: st.column_config.NumberColumn(format="%.0f") for c in ["MIN", *stat_cols]})
         else:
-            on = starts[starts.date == day]
+            on = starts[starts.date == day]  # the app's recommended starters
+            rec = set(on.id)
             playing = set(gl.id[(gl.date == day) & gl.id.isin(team.index)])
             team_plays = set(d["schedule"].team_id[pd.to_datetime(d["schedule"].date) == day])
-            rows = []
-            started_ids = set(on.id)
             sched = d["schedule"]
             opp = sched[pd.to_datetime(sched.date) == day].drop_duplicates("team_id").set_index("team_id").opp
             # matchup (DAL = home vs Dallas, @UTA = at Utah); injured or IL players with a game say so; blank = no game
             status = lambda i: ("IL" if i in il else opp.get(v.team_id.get(i), "") if i in playing else
                                 f"OUT ({opp.get(v.team_id.get(i), '')})" if v.team_id.get(i) in team_plays else "")
-            # spots nobody with a game can fill keep your usual player (best value that fits), so the list keeps
-            # its shape every day; only spots with a game today are green
-            by_slot = {sl: list(on.id[on.slot == sl]) for sl in set(SLOTS)}
-            rest = [i for i in team.sort_values("value", ascending=False).index if i not in started_ids and i not in il
-                    and i not in playing]
-            rows, placed = [], set()
-            for slot in SLOTS:  # one row per active slot, in Yahoo's order (the 3 Util spots take turns)
-                pid = by_slot[slot].pop(0) if by_slot[slot] else next((i for i in rest if fits(v.pos.get(i), slot)), None)
-                if pid in rest:
-                    rest.remove(pid)
-                placed.add(pid)
-                st_ = status(pid) if pid else ""
-                rows.append({"Slot": slot, "Player": team.name.get(pid, "(empty)") if pid else "(empty)", "Matchup": st_,
-                             **{c: per.loc[pid, c] if pid in playing else None for c in stat_cols + shot_cols}})
+            yl = yahoo_day(my_team, day) if synced else None
+            if yl:  # what you've set in Yahoo for this day
+                order = {sl: k for k, sl in enumerate(SLOTS)}
+                assigned = sorted(((sl, i) for i, sl in yl.items() if sl in order and i in team.index),
+                                  key=lambda x: order[x[0]])
+                filled = [sl for sl, _ in assigned]
+                for sl in set(SLOTS):  # slots you've left empty in Yahoo
+                    assigned += [(sl, None)] * (SLOTS.count(sl) - filled.count(sl))
+                assigned.sort(key=lambda x: order[x[0]])
+            else:  # not synced: the recommended lineup, usual players filling spots nobody with a game can
+                by_slot = {sl: list(on.id[on.slot == sl]) for sl in set(SLOTS)}
+                rest = [i for i in team.sort_values("value", ascending=False).index if i not in rec and i not in il
+                        and i not in playing]
+                assigned = []
+                for slot in SLOTS:
+                    pid = by_slot[slot].pop(0) if by_slot[slot] else next((i for i in rest if fits(v.pos.get(i), slot)), None)
+                    if pid in rest:
+                        rest.remove(pid)
+                    assigned.append((slot, pid))
+            act = {i for _, i in assigned if i is not None}
+            # flags: recommended starters you have on the bench, paired with an active player to sit for them (no game
+            # first, then the weakest) when the swap still fills every slot legally
+            tips = {}
+            if yl:
+                pos_, pg_ = v.pos.to_dict(), pgv.to_dict()
+                spare = sorted(act - rec, key=lambda i: (i in playing, pg_.get(i, 0)))
+                for x in sorted(rec - act, key=lambda i: -pg_.get(i, 0)):
+                    if len(act) < len(SLOTS) and assign(act | {x}, pos_) is not None:
+                        tips[x] = "↑ Start (open spot)"
+                        act = act | {x}
+                        continue
+                    for y in spare:
+                        if assign((act - {y}) | {x}, pos_) is not None:
+                            tips[x], tips[y] = f"↑ Start over {team.name[y]}", f"↓ Bench for {team.name[x]}"
+                            act, spare = (act - {y}) | {x}, [z for z in spare if z != y]
+                            break
+            rows = [{"Slot": sl, "Player": team.name.get(i, "(empty)") if i is not None else "(empty)",
+                     "Matchup": status(i) if i is not None else "", "Tip": tips.get(i, ""),
+                     **{c: per.loc[i, c] if i in playing else None for c in stat_cols + shot_cols}} for sl, i in assigned]
+            placed = {i for _, i in assigned}
             for i in team.sort_values("value", ascending=False).index:  # bench: whoever's left, playing first
                 if i not in placed:
                     rows.append({"Slot": "IL" if i in il else "BN", "Player": team.name[i], "Matchup": status(i),
+                                 "Tip": tips.get(i, ""),
                                  **{c: per.loc[i, c] if i in playing else None for c in stat_cols + shot_cols}})
             lineup = pd.DataFrame(rows)
             bn = lineup.Slot.isin(["BN", "IL"])
             rank = lambda t: t.map(lambda x: 3 if x == "IL" else 1 if x.startswith("OUT") else 2 if x == "" else 0)
             lineup = pd.concat([lineup[~bn], lineup[bn].sort_values("Matchup", key=rank, kind="stable")])  # playing first
-            n_open = len(SLOTS) - len(started_ids)
-            st.caption(f"{day:%A}: {len(started_ids)} of your players {'plays and fills' if len(started_ids) == 1 else 'play and fill'} "
-                       "the green spots (best first, by position). Stats are per-game projections." +
-                       (f" {n_open} spot(s) have nobody playing: a streamer with a game this day would start there."
-                        if n_open else ""))
-            green = lineup.Player.map({team.name[i]: i in playing for i in team.index}).fillna(False) & ~lineup.Slot.isin(["BN", "IL"])
-            st.dataframe(lineup.style.apply(lambda col: ["background-color: rgba(34,160,80,0.30)" if g else "" for g in green],
-                                            subset=["Slot", "Player"])
-                         .apply(lambda col: ["color: #999" if t == "IL" or t.startswith("OUT") else "" for t in col],
-                                subset=["Matchup"])
-                         .format({**{c: "{:.1f}" for c in stat_cols + ["FGA", "FTA"]}, "FG%": "{:.1%}", "FT%": "{:.1%}"},
-                                 na_rep=""),
-                         hide_index=True, height=35 * (len(lineup) + 1) + 3)
+            n_play = sum(1 for _, i in assigned if i in playing)
+            src = "your Yahoo lineup" if yl else "the recommended lineup"
+            st.caption(f"{day:%A}, {src}: {n_play} active player{'s' if n_play != 1 else ''} with a game (green). Stats are "
+                       "per-game projections." + (f" {len(SLOTS) - len(rec)} spot(s) have nobody playing: a streamer with "
+                                                  "a game this day would start there." if len(rec) < len(SLOTS) else ""))
+            moves_ = [f"start {team.name[x]} over {t.split('over ', 1)[1]}" if "over" in t else f"start {team.name[x]}"
+                      for x, t in tips.items() if t.startswith("↑")]
+            if moves_:
+                st.markdown(f":orange[⚠ Lineup check for {day:%A}: " + "; ".join(moves_) + ".]")
+            if "Tip" in lineup and not lineup.Tip.str.len().any():
+                lineup = lineup.drop(columns="Tip")
+            green = [r["Matchup"] not in ("", "IL") and not str(r["Matchup"]).startswith("OUT") and r["Slot"] not in ("BN", "IL")
+                     for _, r in lineup.iterrows()]
+            sty = (lineup.style.apply(lambda col: ["background-color: rgba(34,160,80,0.30)" if g else "" for g in green],
+                                      subset=["Slot", "Player"])
+                   .apply(lambda col: ["color: #999" if t == "IL" or t.startswith("OUT") else "" for t in col],
+                          subset=["Matchup"])
+                   .format({**{c: "{:.1f}" for c in stat_cols + ["FGA", "FTA"]}, "FG%": "{:.1%}", "FT%": "{:.1%}"},
+                           na_rep=""))
+            if "Tip" in lineup:
+                sty = sty.apply(lambda col: ["color: #E8A33D; font-weight: 600" if t else "" for t in col], subset=["Tip"])
+            st.dataframe(sty, hide_index=True, height=35 * (len(lineup) + 1) + 3)
 
         stream_planner(v, team, il, cats, teams, roster, max_adds, moves, names.get(my_team) if synced else None)
 
@@ -692,11 +800,18 @@ with tab_match:
         adds_left = max((max_adds if max_adds is not None else 4) - adds_used(moves, names.get(my_team), this_week()[0]), 0)
         c2.metric("Adds left this week", adds_left)
         bank = lambda r: tuple((c, float(r.get(c, 0) or 0)) for c in model.COUNT)
-        base, p0, options, starts, opp_starts = matchup_plan(
+        wk_days = list(pd.date_range(today, this_week()[1]))
+        base, p0, options, starts, opp_starts, p_rec = matchup_plan(
             active(my_team), active(int(me_row.opp_id)), tuple(v.index[~v.Mine & ~v.Taken]), bank(me_row), bank(opp_row),
-            tuple(cats), today, d["updated"], CODE, int(teams * roster), give, v.value)
+            tuple(cats), today, d["updated"], CODE, int(teams * roster), give, v.value,
+            # you: what you've set in Yahoo; opponent: today's set lineup, then their best lineup (they can still
+            # fix later days, so their sloppy future lineups shouldn't inflate your odds)
+            yahoo_active(my_team, wk_days), yahoo_active(int(me_row.opp_id), wk_days[:1]))
         m1, m2, m3 = st.columns(3)
-        m1.metric("Chance to win the matchup", f"{p0:.0%}", border=True)
+        m1.metric("Chance to win the matchup", f"{p0:.0%}",
+                  f"{p_rec - p0:+.0%} with the recommended lineup" if abs(p_rec - p0) >= 0.005 else None,
+                  delta_color="normal", border=True,
+                  help="With the lineups you and your opponent have set in Yahoo for the rest of the week")
         m2.metric("Categories expected", f"{base.p_win.sum():.1f} of {len(cats)}", border=True)
         m3.metric("Games left to start", f"{len(starts)} vs {len(opp_starts)}", border=True)
         tbl = pd.DataFrame({"Me so far": [me_row.get(c) for c in base.index], "Them so far": [opp_row.get(c) for c in base.index],
@@ -713,9 +828,9 @@ with tab_match:
                      .format("{:.0%}", subset=["Win %"])
                      .apply(lambda col: [shade((x - 0.5) * 2) for x in col], subset=["Win %"]),
                      hide_index=True)
-        st.caption("So far = Yahoo's totals (games in your active lineup). Projected = so far + each side's remaining "
-                   f"games their daily lineup would start, each as {model.P_PLAY:.0%} of a game; your opponent is assumed "
-                   "to start their best players. FG%/FT% come from projected makes and attempts, so a shooter moves them "
+        st.caption("So far = Yahoo's totals (games in active lineups). Projected = so far + remaining games started: "
+                   "yours as you've set them in Yahoo, your opponent's as set today and their best lineup after that (they "
+                   f"can still change later days). Each game counts as {model.P_PLAY:.0%} of a game. FG%/FT% come from projected makes and attempts, so a shooter moves them "
                    "only as much as his attempts allow. Win % has the game-to-game swings of each stat measured from "
                    "past seasons.")
 
@@ -728,10 +843,10 @@ with tab_match:
             st.info("No start/bench switch or add improves your chances right now.")
         else:
             options = options.assign(gain=options.p - p0)
-            st.markdown("**Who to start** (switches from the default lineup above that raise your chance to win)")
+            st.markdown("**Who to start** (changes to your Yahoo lineup that raise your chance to win)")
             sw = options[(options.kind == "start") & (options.gain > 0.005)].sort_values("gain", ascending=False)
             if sw.empty:
-                st.caption("The default daily lineup (best players with a game) is already your best shot.")
+                st.caption("Your Yahoo lineup is already your best shot.")
             else:
                 st.dataframe(pd.DataFrame({
                     "Day": sw.date.map(lambda x: f"{pd.Timestamp(x):%a %m/%d}"), "Start": sw["in"].map(v.name),
