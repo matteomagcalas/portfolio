@@ -202,6 +202,66 @@ def fill_lineup(team):
     return lineup
 
 
+def stream_planner(v, team, il, cats, teams, roster, max_adds, moves, my_name):
+    """Swap expendable players for free agents with more games left this week, within the league's weekly adds.
+    Week gain = (his expected games left x his per-game value) - (same for the player you drop); a dropped player's
+    games already played this week stay yours. Season cost = rest-of-season value given up by the swap."""
+    st.subheader("Streaming: turn adds into games")
+    ws, we = this_week()
+    used = 0
+    if moves is not None and my_name and len(moves):
+        t = moves.time.dt.tz_localize(None)
+        used = int(((moves.type == "add") & (moves.to == my_name) & (t >= ws)).sum())
+    c1, c2 = st.columns(2)
+    cap = c1.number_input("Adds per week (league setting)", 0, 50, max_adds if max_adds is not None else 4,
+                          help="Read from your Yahoo league when synced")
+    give = c2.number_input("Most season value you'll give up per swap", 0.0, 5.0, 0.5, 0.1,
+                           help="Rest-of-season value lost by a swap (dropped player's value minus the add's). "
+                                "0 = only swaps that don't cost you anything long term")
+    left_adds = max(cap - used, 0)
+    wk = week_board(tuple(cats), int(teams * roster), d["updated"], CODE)
+    # per-game value over replacement (never negative), with this week's starting-lineup boost
+    per = v.reset_index()
+    boost = ((per.MPG + per.opp_min) / per.MPG).where(per.MPG > 0, 1)
+    per = per.assign(**{c: per[c] * boost for c in model.COUNT}, MPG=per.MPG + per.opp_min, GP=82.0)
+    pgv = model.value(per, list(cats), int(teams * roster)).set_index("id").value.reindex(v.index).fillna(0)
+    games_left = wk.g_left.reindex(v.index).fillna(0)
+    week_left = pgv * games_left * model.P_PLAY
+    drops = team[~team.index.isin(il)]
+    fas = v[~v.Mine & ~v.Taken & (games_left > 0)]
+    fas = fas.loc[week_left[fas.index].nlargest(60).index]  # the best weeks left; plenty for pairing
+    pairs = pd.DataFrame([(dp, fa) for dp in drops.index for fa in fas.index], columns=["drop", "add"])
+    pairs["gain"] = week_left[pairs["add"]].values - week_left[pairs["drop"]].values
+    pairs["season"] = v.value[pairs["add"]].values - v.value[pairs["drop"]].values
+    pairs = pairs[(pairs.gain > 0) & (pairs.season >= -give)].sort_values("gain", ascending=False)
+    plan, used_ids = [], set()
+    for r in pairs.itertuples():  # greedy: best swap first, each player used once
+        if len(plan) >= left_adds:
+            break
+        if r.drop not in used_ids and r.add not in used_ids:
+            plan.append(r)
+            used_ids |= {r.drop, r.add}
+    st.caption(f"{used} of {cap} adds used this week ({ws:%b %d} - {we:%b %d}), {left_adds} left. Games left count "
+               f"each healthy game as {model.P_PLAY:.0%} of a game. Re-check daily: after a streamer plays, he can be "
+               "swapped again.")
+    show = lambda rows: pd.DataFrame([{"Drop": v.name[r.drop], "His games left": int(games_left[r.drop]),
+                                       "Add": v.name[r.add], "Team": v.team[r.add], "Pos": v.pos[r.add],
+                                       "Their games left": int(games_left[r.add]), "Week gain": r.gain,
+                                       "Season value change": r.season} for r in rows])
+    fmt = {"Week gain": st.column_config.NumberColumn(format="%+.2f",
+                                                      help="Value of the games you gain minus the games you give up this week"),
+           "Season value change": st.column_config.NumberColumn(format="%+.2f",
+                                                                help="Rest-of-season value: add minus drop")}
+    if not plan:
+        st.info("No swap adds games this week within your adds and season-value limit." if left_adds else
+                "No adds left this week.")
+    else:
+        st.markdown("**Suggested swaps**")
+        st.dataframe(show(plan), hide_index=True, column_config=fmt)
+    with st.expander("More swap options"):
+        st.dataframe(show(list(pairs.head(30).itertuples())), hide_index=True, column_config=fmt)
+
+
 # ---- sidebar: league setup ----
 with st.sidebar:
     st.header("League")
@@ -209,12 +269,12 @@ with st.sidebar:
     league_id = st.text_input("Yahoo league ID", st.query_params.get("league", ""),
                               help="The number in your league URL: basketball.fantasysports.yahoo.com/nba/<ID>. "
                                    "The league must be public. Leave blank to tick Mine/Taken by hand.").strip()
-    rosters = moves = None
+    rosters = moves = max_adds = None
     if league_id != st.query_params.get("league", ""):
         st.query_params["league"] = league_id
     if league_id:
         try:
-            rosters, moves = league(league_id, CODE)
+            rosters, moves, max_adds = league(league_id, CODE)
         except Exception as e:
             st.error(f"Couldn't read Yahoo league {league_id} (is it public?): {e}")
     if rosters is not None and len(rosters):
@@ -460,41 +520,21 @@ with tab_team:
         v["wk_games"] = model.games_between(v.index, d["injuries"], d["schedule"], d["players"], start, week[1]).values
         team = v[v.Mine]
         lineup = fill_lineup(team.drop(il & set(team.index)))
-        free = v[~v.Mine & ~v.Taken & (v.wk_games > 0)]
 
-        st.subheader(f"Positional needs: week of {week[0]:%b %d} - {week[1]:%b %d}")
-        st.caption("Your best lineup this week, slot by slot, against the best undrafted player who could fill it. "
-                   "Players out all week leave their slot empty. Updates as injuries and schedules change.")
-        rows = []
-        for i, slot in enumerate(SLOTS):
-            pid = lineup[i]
-            cur = team.loc[pid] if pid is not None else None
-            cands = free[free.pos.map(lambda p: fits(p, slot))]
-            best = cands.iloc[0] if len(cands) else None
-            cur_val = cur.value if cur is not None else 0.0
-            rows.append({"Slot": slot, "Starter": cur["name"] if cur is not None else "EMPTY",
-                         "Value": cur_val if cur is not None else None,
-                         "Games this wk": cur.wk_games if cur is not None else 0,
-                         "Best available": best["name"] if best is not None else "",
-                         "Their value": best.value if best is not None else None,
-                         "Upgrade": round(best.value - cur_val, 2) if best is not None else None})
-        rows += [{"Slot": "IL", "Starter": p["name"], "Value": p.value, "Games this wk": p.wk_games}
+        st.subheader(f"Lineup: week of {week[0]:%b %d} - {week[1]:%b %d}")
+        st.caption("Your best lineup this week, slot by slot. Players out all week leave their slot empty. "
+                   "Updates as injuries and schedules change.")
+        rows = [{"Slot": slot, "Player": team.loc[pid, "name"] if pid is not None else "EMPTY",
+                 "Value": team.loc[pid, "value"] if pid is not None else None,
+                 "Games this wk": team.loc[pid, "wk_games"] if pid is not None else 0} for slot, pid in zip(SLOTS, lineup.values())]
+        rows += [{"Slot": "IL", "Player": p["name"], "Value": p.value, "Games this wk": p.wk_games}
                  for _, p in team[team.index.isin(il)].iterrows()]  # no IL rows when nobody's on IL
-        needs = pd.DataFrame(rows)
         bench = team.drop([p for p in lineup.values() if p is not None] + list(il & set(team.index)))
-        top = needs[needs.Upgrade > 0].sort_values("Upgrade", ascending=False).drop_duplicates("Best available").head(3)
-        if top.empty:
-            st.success("No undrafted player beats any of your starters right now.")
-        for _, r in top.iterrows():
-            st.markdown(f"- **{r.Slot}**: {r['Best available']} would add **+{r.Upgrade:.2f}** "
-                        f"over {r.Starter if r.Starter != 'EMPTY' else 'an empty slot'}")
-        st.dataframe(needs.style.apply(lambda col: col.map(lambda x: shade(x / 3) if pd.notna(x) and x > 0 else ""),
-                                       subset=["Upgrade"]), hide_index=True,
-                     column_config={"Value": st.column_config.NumberColumn(format="%.2f"),
-                                    "Their value": st.column_config.NumberColumn(format="%.2f"),
-                                    "Upgrade": st.column_config.NumberColumn(format="%+.2f")})
+        st.dataframe(pd.DataFrame(rows), hide_index=True, column_config={"Value": st.column_config.NumberColumn(format="%.2f")})
         if len(bench):
             st.caption("Bench: " + ", ".join(f"{p['name']} ({p.wk_games} g)" for _, p in bench.iterrows()))
+
+        stream_planner(v, team, il, cats, teams, roster, max_adds, moves, names.get(my_team) if synced else None)
 
 with tab_waiver:
     team = v[v.Mine]

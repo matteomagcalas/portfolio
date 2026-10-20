@@ -107,7 +107,8 @@ def _flat(parts):
 
 def yahoo_league(league_id):
     """Live rosters and recent moves of a public Yahoo league (no login needed).
-    Returns (rosters: team_id, team, key, name, slot (today's Yahoo slot: PG..Util, BN, IL); moves: time, type, name, from, to); key = normalized name."""
+    Returns (rosters: team_id, team, key, name, slot (today's Yahoo slot: PG..Util, BN, IL); moves: time, type, name, from, to;
+    max_adds: the league's adds per week, None if unlimited); key = normalized name."""
     url = f"https://pub-api-rw.fantasysports.yahoo.com/fantasy/v2/league/nba.l.{league_id}/{{}}?format=json"
     h = {"User-Agent": "Mozilla/5.0"}
     teams = _get(url.format("teams/roster"), headers=h)["fantasy_content"]["league"][1]["teams"]
@@ -134,7 +135,9 @@ def yahoo_league(league_id):
                           "type": move["type"], "name": _flat(p[0])["name"]["full"],
                           "from": move.get("source_team_name", move.get("source_type", "")),
                           "to": move.get("destination_team_name", move.get("destination_type", ""))})
-    return pd.DataFrame(rosters), pd.DataFrame(moves, columns=["time", "type", "name", "from", "to"])
+    settings = _get(url.format("settings"), headers=h)["fantasy_content"]["league"][1]["settings"][0]
+    max_adds = int(settings["max_weekly_adds"]) if str(settings.get("max_weekly_adds", "")).isdigit() else None
+    return pd.DataFrame(rosters), pd.DataFrame(moves, columns=["time", "type", "name", "from", "to"]), max_adds
 
 
 def _players(season):
