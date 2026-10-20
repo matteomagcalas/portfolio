@@ -412,23 +412,28 @@ with tab_waiver:
     else:
         worst = team.sort_values("value").iloc[0]
         st.caption(f"Free agents ranked by value. Your lowest-value player is **{worst['name']}** ({worst.value:.2f}). "
-                   "Upgrade = value gained by swapping that player out. Category columns show the change per game.")
+                   "Upgrade = value gained by swapping that player out (green = better than him, red = worse). "
+                   "Category columns show the change per game.")
         fa = v[~v.Mine & ~v.Taken].copy()
         fa["Upgrade"] = (fa.value - worst.value).round(2)
         for c in cats:
-            fa[f"Δ{c}"] = (fa[f"z_{c}"] - worst[f"z_{c}"]).round(1)
-        fa = fa[fa.Upgrade > 0]
-        f1, f2 = st.columns(2)
+            fa[f"Δ{c}"] = fa[f"z_{c}"] - worst[f"z_{c}"]
+        f1, f2, f3 = st.columns([2, 2, 1])
         pos_filter = f1.multiselect("Position ", POSITIONS)
         team_filter = f2.multiselect("Team ", NBA_TEAMS)
         if pos_filter:
             fa = fa[pos_match(fa, pos_filter)]
+        show = f3.number_input("Players shown", 10, 500, 100, step=10)
         if team_filter:
             fa = fa[fa.team.isin(team_filter)]
+        num = ["Upgrade", "value", *(["opp_min"] if in_season else []), *[f"Δ{c}" for c in cats]]
         st.dataframe(fa[["Photo", "name", "Logo", "team", "pos", "Upgrade", "value", *(["RankChg", "opp_min"] if in_season else []),
-                         *[f"Δ{c}" for c in cats], "Injury"]]
-                     .head(50).style.apply(lambda col: col.map(injury_badge), subset=["Injury"]),
-                     hide_index=True, column_config=FMT)
+                         *[f"Δ{c}" for c in cats], "Injury"]].head(show).style
+                     .apply(lambda col: col.map(injury_badge), subset=["Injury"])
+                     .apply(lambda col: (col / 3).map(shade), subset=["Upgrade"])
+                     .format("{:+.2f}", subset=[c for c in num if c != "value"]).format("{:.2f}", subset=["value"])
+                     .format("{:+.0f}", subset=["RankChg"] if in_season else []),
+                     hide_index=True, column_config=FMT, height=600)
         if in_season:
             st.subheader("Minutes opening up: next 2 weeks")
             st.caption("Free agents moving into the starting lineup (ESPN depth chart, injured players skipped) who mostly came "
@@ -449,10 +454,13 @@ with tab_waiver:
                                    int(teams * roster)).set_index("id")
                 nxt = allv.loc[nxt.id]
                 nxt["pg_rank"] = nxt.value_pg.map(lambda x: int((allv.value_pg > x).sum()) + 1)
-                nxt = nxt.sort_values("value", ascending=False).head(15)
+                nxt = nxt.sort_values("value", ascending=False).head(50)
                 st.dataframe(nxt[["name", "team", "pos", "opp_min", "MPG", "wk2", "pg_rank", *[c for c in STAT_COLS if c not in ("GP", "MPG")], "Injury"]],
                              hide_index=True, column_config={**FMT, "wk2": st.column_config.NumberColumn("Games (2 wk)"),
-                                                             "MPG": st.column_config.NumberColumn("MPG (boosted)", format="%.1f"),
+                                                             "MPG": st.column_config.NumberColumn("MPG (boosted)", format="%.2f"),
+                                                             "opp_min": st.column_config.NumberColumn("+Min (role)", format="%+.2f"),
+                                                             **{c: st.column_config.NumberColumn(format="%.2f") for c in STAT_COLS
+                                                                if c not in ("GP", "MPG", "FG%", "FT%")},
                                                              "pg_rank": st.column_config.NumberColumn("Per-game rank", help="Where his per-game "
                                                                  "line while starting would rank among all players")})
     if moves is not None and len(moves):
