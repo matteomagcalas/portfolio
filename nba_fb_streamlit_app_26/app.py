@@ -87,7 +87,12 @@ def board(cats, pool_size, updated, code):  # code: model/espn version, so a pus
     starter_now = pd.Series(1.0, index=dc.groupby(["team_id", "pos"]).id.first().unique())
     pre_start = pd.Series(1.0, index=d["preseason_depth"].query("slot == 0").id.unique())
     pre_start = pre_start.reindex(pre.id).fillna(0)  # preseason role: starter or bench, worth 4 games
-    promo = model.promotion(games, today, starter_now, model.IN_SEASON["tau_m"], pre_start, model.IN_SEASON["Km"])
+    # an injured starter keeps his spot here: he returns to it (past seasons: 'starting now' = his first game back)
+    held = d["depth"][d["depth"].id.isin(out_now) & (d["depth"].slot == 0)].id
+    promo = model.promotion(games, today, pd.concat([starter_now, pd.Series(1.0, index=held.unique())]),
+                            model.IN_SEASON["tau_m"], pre_start)
+    # rest of season: role kept or lost (ROLE_ROS); next 2 weeks: the fresh-change extra on top (OPP_MIN_PER_START)
+    proj = model.with_role(proj.set_index("id"), promo, model.ROLE_ROS).reset_index()
     proj["opp_min"] = (proj.id.map(promo).fillna(0) * model.OPP_MIN_PER_START).where(~proj.id.isin(out_now), 0)
     v = model.value(proj, list(cats), pool_size)
     inj = d["injuries"].drop_duplicates("id").set_index("id")
@@ -289,8 +294,8 @@ FMT.update({"FG%": st.column_config.NumberColumn(format="%.3f"), "FT%": st.colum
                                                      help="Preseason rank minus rank now. Green/+ = climbed since opening night"),
             "PreRank": st.column_config.NumberColumn("Pre Rk", help="Rank in the preseason projection, frozen before opening night"),
             "opp_min": st.column_config.NumberColumn("+Min (role)", format="%+.1f",
-                                                     help="Minutes per game gained (or lost) over the next 2 weeks from moving "
-                                                          "into (out of) the starting lineup, beyond what his recent games show"),
+                                                     help="Extra minutes per game for the next 2 weeks from a fresh move into (out of) "
+                                                          "the starting lineup, on top of the rest-of-season role change already in his projection"),
             "gp_so_far": st.column_config.NumberColumn("GP so far", format="%.0f"),
             "g_played": st.column_config.NumberColumn("Played", format="%.0f", help="Games played this week"),
             "g_left": st.column_config.NumberColumn("Left", format="%.0f",
@@ -518,10 +523,10 @@ with tab_waiver:
         # works from opening night: role = depth chart vs. preseason role until games pile up
         st.subheader("Minutes opening up: next 2 weeks")
         st.caption("Free agents moving into the starting lineup (ESPN depth chart, injured players skipped) who mostly came "
-                   "off the bench lately. Backtest: these players average about 4.7 more minutes over the next 2 weeks than "
-                   "their recent games suggest. Valued over their games in the next 14 days; often short-term streamers.")
+                   "off the bench lately. Backtest: about 4.5 more minutes over the next 2 weeks than their recent games "
+                   "suggest (about 2.4 of it lasts the rest of the season if he keeps the job). Valued over their games in the next 14 days; often short-term streamers.")
         today = pd.Timestamp.now(tz="America/New_York").tz_localize(None).normalize()
-        nxt = v[~v.Mine & ~v.Taken & (v.opp_min >= 2) & (v.MPG > 0)].reset_index()  # 2+ = at least half a start-share
+        nxt = v[~v.Mine & ~v.Taken & (v.opp_min >= model.OPP_MIN_PER_START / 2) & (v.MPG > 0)].reset_index()  # at least half a start-share
         if nxt.empty:
             st.info("No free agent is moving into a starting lineup right now.")
         else:

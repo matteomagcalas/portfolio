@@ -262,28 +262,41 @@ def project_by_role(stats, target, current_team, starter, players, injuries=None
     return bench.where(~is_start & bench.PTS.notna(), plain).reset_index()
 
 
-# In-season blend, fit by backtest_inseason.py on 2023-24..2025-26 (refit leaving each season out: nearly the same).
-# K = minutes of play the preseason rate is worth; tau = days for a game's weight to fall to 37%. 1e12 = this
-# season's games never beat the prior for that rate (REB, STL, TO per minute are that stable). Minutes react fast
-# (prior worth 4 games, 30-day fade); availability: prior worth 40 team games. Held-out rest-of-season PTS error
-# vs preseason-only / season-to-date-only: first month 2.70 vs 3.07/3.60, months 2-3 2.58 vs 3.28/2.97.
-IN_SEASON = dict(K={"PTS": 200, "REB": 1e12, "AST": 400, "STL": 1e12, "BLK": 400, "3PM": 400, "TO": 1e12, "FGM": 400,
-                    "FGA": 200, "FTM": 400, "FTA": 400},
-                 tau={"PTS": 120, "REB": np.inf, "AST": 120, "STL": np.inf, "BLK": 120, "3PM": np.inf, "TO": np.inf,
-                      "FGM": 120, "FGA": 120, "FTM": 120, "FTA": 120},
-                 Km=4, tau_m=30, Kh=40, new_mpg=10)
+# In-season blend, fit by backtest_inseason.py on 2023-24..2025-26. K = minutes of play the preseason rate is worth,
+# as (when running above it, when running below it): breakouts hold up more often than slumps (held-out: players
+# 8+ PTS+REB+AST/game above projection kept 80% of it the rest of the season; one shared weight kept only 65% in
+# the projection, separate weights 77%). tau = days for a game's weight to fall to 37%. Minutes: prior worth 2
+# games when he's playing more, 8 when less, 30-day fade. Availability: prior worth 40 team games. Held-out
+# rest-of-season PTS error, first month / months 2-3 / after: 2.69/2.58/2.91 (one weight) -> 2.65/2.53/2.81
+# (with ROLE_ROS below); preseason-only was 3.07/3.28/3.90.
+IN_SEASON = dict(K={"PTS": (200, 400), "REB": (200, 400), "AST": (200, 400), "STL": (800, 800), "BLK": (800, 400),
+                    "3PM": (200, 400), "TO": (800, 400), "FGM": (200, 400), "FGA": (100, 200), "FTM": (400, 200),
+                    "FTA": (400, 200)},
+                 tau={"PTS": 60, "REB": 120, "AST": 60, "STL": 120, "BLK": 120, "3PM": 120, "TO": np.inf, "FGM": 60,
+                      "FGA": 60, "FTM": 120, "FTA": 120},
+                 Km=(2, 8), tau_m=30, Kh=40, new_mpg=10)
+# Rest-of-season MPG per unit of promotion() on top of the blend: a fill-in back on the bench (starter returned)
+# loses minutes, a player who keeps the job keeps them. Held out 2.1/2.5/2.7, all seasons 2.44.
+ROLE_ROS = 2.44
+# EXTRA next-2-week MPG per unit of promotion(), on top of ROLE_ROS (a fresh role change is biggest right away):
+# fit on 2023-24..2025-26 checkpoints, "starting now" = started his team's next game, preseason role = started his
+# first game. Held out 1.7/2.1/2.4; next-2-week minutes error for role changers 5.31/4.97/4.67 -> 4.89/4.67/4.52.
+# All seasons 2.05, so ~4.5 MPG in total for the next 2 weeks. (Tried first: minutes vacated by injured teammates;
+# spread over the whole bench it gave ~0.)
+OPP_MIN_PER_START = 2.05
 
 
-# Next-2-week MPG change per unit of promotion(): fit on 2023-24..2025-26 checkpoints, "starting now" = started his
-# team's next game, preseason role = started his first game. Held out 2023-24/24-25/25-26: 4.4/4.8/5.1; next-2-week
-# minutes error for role changers 6.58/6.15/5.82 -> 5.02/4.80/4.71 (everyone 4.72/4.65/4.67 -> 4.45/4.44/4.49).
-# All three seasons: 4.73. (Tried first: minutes vacated by injured teammates; spread over the bench it gave ~0.)
-OPP_MIN_PER_START = 4.7
+def _up_down(k, season, prior):
+    """Prior weight: one number, or (above, below) = separate weights for running above / below the prior
+    (backtest: big breakouts hold up more often than big drops)."""
+    if not isinstance(k, tuple):
+        return k
+    return pd.Series(np.where(season > prior, k[0], k[1]), index=prior.index)
 
 
 def in_season(prior, games, today, K, tau, Km, tau_m, Kh, new_mpg):
     """Rest-of-season per-game projection: the preseason `prior` updated with this season's `games` before `today`.
-    Per-minute rates: prior rate counted as K[c] minutes of play, plus every game's stats weighted by
+    Per-minute rates: prior rate counted as K[c] minutes of play (or (above, below) pair), plus every game's stats weighted by
     exp(-days ago / tau[c]); a hot week moves a stat only as far as the backtest says it predicts.
     Minutes: prior MPG counted as Km games, plus games weighted by exp(-days ago / tau_m).
     Availability: prior health counted as Kh team games, plus share of his team's games he played.
@@ -305,11 +318,13 @@ def in_season(prior, games, today, K, tau, Km, tau_m, Kh, new_mpg):
         w = np.exp(-ago / tau[c])
         num = (g[c] * w).groupby(g.id).sum().reindex(ids).fillna(0)
         den = (g.MPG * w).groupby(g.id).sum().reindex(ids).fillna(0)
-        out[c] = (K[c] * rate0[c] + num) / (K[c] + den)  # per-minute rate for now
+        k = _up_down(K[c], num / den.where(den > 0), rate0[c])
+        out[c] = (k * rate0[c] + num) / (k + den)  # per-minute rate for now
     w = np.exp(-ago / tau_m)
     num = (g.MPG * w).groupby(g.id).sum().reindex(ids).fillna(0)
     den = w.groupby(g.id).sum().reindex(ids).fillna(0)
-    out["MPG"] = (Km * mpg0 + num) / (Km + den)
+    km = _up_down(Km, num / den.where(den > 0), mpg0)
+    out["MPG"] = (km * mpg0 + num) / (km + den)
     out[COUNT] = out[COUNT].mul(out.MPG, axis=0)
     # availability: games played / his current team's games so far (a traded player: since joining)
     last = g.sort_values("day").groupby("id").team_id.last()
@@ -339,6 +354,16 @@ def promotion(games, today, starter_now, tau_m, prior_start=None, k=4):
     num, den = (g.GS * w).groupby(g.id).sum().reindex(ids).fillna(0), w.groupby(g.id).sum().reindex(ids).fillna(0)
     recent = ((k * s0).fillna(0) + num) / (k * s0.notna() + den)
     return (starter_now.reindex(recent.index).fillna(0) - recent).dropna().rename("promo")
+
+
+def with_role(proj, promo, mpg_per_start):
+    """Shift minutes by mpg_per_start x promotion (+ = moving into the lineup, - = losing his spot) and scale the
+    counting stats with them (same per-minute rates). proj indexed by id."""
+    p = proj.copy()
+    mpg = (p.MPG + promo.reindex(p.index).fillna(0) * mpg_per_start).clip(lower=0)
+    p[COUNT] = p[COUNT].mul((mpg / p.MPG).where(p.MPG > 0, 1), axis=0)
+    p["MPG"] = mpg
+    return p
 
 
 # Share of his team's games a rotation player who played the last one plays over the next 7 days (game logs:
