@@ -448,7 +448,7 @@ if synced:
     if scoreboard is not None and my_team in set(scoreboard.team_id):
         _teams += (int(scoreboard.opp_id[scoreboard.team_id == my_team].iloc[0]),)
     try:
-        _yl = yahoo_lineups(league_id, _teams, tuple(f"{dt:%Y-%m-%d}" for dt in pd.date_range(max(_today, _ws), _we)), CODE)
+        _yl = yahoo_lineups(league_id, _teams, tuple(f"{dt:%Y-%m-%d}" for dt in pd.date_range(_ws, _we)), CODE)
         _yl["id"] = _yl.key.map(ids)
         ylineups = _yl.dropna(subset=["id"]).astype({"id": int}).assign(date=lambda x: pd.to_datetime(x.date))
     except Exception:
@@ -690,16 +690,31 @@ with tab_team:
         shot_cols = ["FG%", "FGA", "FT%", "FTA"]  # percentages next to their volume
         if day < today:  # done: what your players actually did
             g = d["games"]
-            box = g[g.id.isin(team.index) & (g.day == (day - pd.to_datetime(d["schedule"].date).min()).days + 1)]
+            box = g[g.day == (day - pd.to_datetime(d["schedule"].date).min()).days + 1]
+            yl = yahoo_day(my_team, day) if synced else None
+            # who you had that day per Yahoo (dropped players still count for the days they started)
+            box = box[box.id.isin(yl)].assign(Slot=box.id.map(yl)) if yl else box[box.id.isin(team.index)].assign(Slot="?")
             if box.empty:
                 st.info(f"None of your players played on {day:%A}.")
             else:
-                box = box.assign(Player=box.id.map(team.name), MIN=box.MPG,
-                                 **{"FG": box.FGM.astype(int).astype(str) + "-" + box.FGA.astype(int).astype(str),
-                                    "FT": box.FTM.astype(int).astype(str) + "-" + box.FTA.astype(int).astype(str)})
-                st.caption(f"{day:%A}: box scores (every game your players played, started or not).")
-                st.dataframe(box[["Player", "MIN", *stat_cols, "FG", "FT"]], hide_index=True,
-                             column_config={c: st.column_config.NumberColumn(format="%.0f") for c in ["MIN", *stat_cols]})
+                order = {sl: k for k, sl in enumerate(dict.fromkeys(SLOTS + ["BN", "IL", "IL+", "?"]))}
+                box = box.assign(Player=box.id.map(v.name), MIN=box.MPG).sort_values("Slot", key=lambda s: s.map(order))
+                started = ~box.Slot.isin(["BN", "IL", "IL+"])
+                tot = box[started][["FGM", "FGA", "FTM", "FTA", "MPG", *stat_cols]].sum()
+                rows = pd.concat([box, pd.DataFrame([{**tot, "MIN": tot.MPG, "Slot": "", "Player": "Total (starters)"}])],
+                                 ignore_index=True)
+                rows = rows.assign(**{"FG": rows.FGM.astype(int).astype(str) + "-" + rows.FGA.astype(int).astype(str),
+                                      "FT": rows.FTM.astype(int).astype(str) + "-" + rows.FTA.astype(int).astype(str),
+                                      "FG%": rows.FGM / rows.FGA.where(rows.FGA > 0), "FT%": rows.FTM / rows.FTA.where(rows.FTA > 0)})
+                bench = list(~started) + [False]
+                st.caption(f"{day:%A}: box scores. Gray = on your bench that day, so it didn't count; the total is your "
+                           "starters only." if yl else f"{day:%A}: box scores (Yahoo lineup unavailable, so every game counts).")
+                cols = ["Slot", "Player", "MIN", *stat_cols, "FG", "FG%", "FT", "FT%"]
+                st.dataframe(rows[cols].style
+                             .apply(lambda r: ["color: #999; font-style: italic" if bench[r.name] else
+                                               "font-weight: bold" if r.Player == "Total (starters)" else ""] * len(r), axis=1)
+                             .format({**{c: "{:.0f}" for c in ["MIN", *stat_cols]}, "FG%": "{:.1%}", "FT%": "{:.1%}"}, na_rep=""),
+                             hide_index=True, height=35 * (len(rows) + 1) + 3)
         else:
             on = starts[starts.date == day]  # the app's recommended starters
             rec = set(on.id)
@@ -769,8 +784,18 @@ with tab_team:
                 st.markdown(f":orange[⚠ Lineup check for {day:%A}: " + "; ".join(moves_) + ".]")
             green = [r["Matchup"] not in ("", "IL") and not str(r["Matchup"]).startswith("OUT") and r["Slot"] not in ("BN", "IL")
                      for _, r in lineup.iterrows()]
+            # projected day total from the green rows (active spot + a game); bench and IL don't count
+            ids_on = [i for (_, i) in assigned if i in playing and i not in il]
+            t = per.loc[ids_on, model.COUNT].sum()
+            lineup = pd.concat([lineup, pd.DataFrame([{
+                "Slot": "", "Player": "Total (starters)", "Matchup": "", **t[stat_cols + ["FGA", "FTA"]],
+                "FG%": t.FGM / t.FGA if t.FGA else None, "FT%": t.FTM / t.FTA if t.FTA else None}])], ignore_index=True)
+            green.append(False)
+            bench = list(lineup.Slot.isin(["BN", "IL"]))
             sty = (lineup.style.apply(lambda col: ["background-color: rgba(34,160,80,0.30)" if g else "" for g in green],
                                       subset=["Slot", "Player"])
+                   .apply(lambda r: ["color: #999; font-style: italic" if bench[r.name] else
+                                     "font-weight: bold" if r.Player == "Total (starters)" else ""] * len(r), axis=1)
                    .apply(lambda col: ["color: #999" if t == "IL" or t.startswith("OUT") else "" for t in col],
                           subset=["Matchup"])
                    .format({**{c: "{:.1f}" for c in stat_cols + ["FGA", "FTA"]}, "FG%": "{:.1%}", "FT%": "{:.1%}"},
