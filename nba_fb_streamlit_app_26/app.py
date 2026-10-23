@@ -285,7 +285,8 @@ def matchup_plan(my_ids, opp_ids, fa_ids, banked, banked_opp, cats, today, updat
 
     def odds(starts, opp_starts):
         return model.week_odds(banked, [vec.get(i, zero) for i, _, _ in starts],
-                               banked_opp, [vec.get(i, zero) for i, _, _ in opp_starts], list(cats))
+                               banked_opp, [vec.get(i, zero) for i, _, _ in opp_starts], list(cats),
+                               [i for i, _, _ in starts], [i for i, _, _ in opp_starts])
 
     def as_set(ids, lineup):  # Yahoo lineups where known, recommended for the other days
         known = {dt: set(a) for dt, a in lineup}
@@ -850,8 +851,9 @@ with tab_match:
         st.caption("So far = Yahoo's totals (games in active lineups). Projected = so far + remaining games started: "
                    "yours as you've set them in Yahoo, your opponent's as their best possible lineup every day (the worst case "
                    f"for you). Each game counts as {model.P_PLAY:.0%} of a game. FG%/FT% come from projected makes and attempts, so a shooter moves them "
-                   "only as much as his attempts allow. Win % has the game-to-game swings of each stat measured from "
-                   "past seasons.")
+                   "only as much as his attempts allow. Win % allows for game-to-game swings and for players running "
+                   "hot or cold against their projection all week (both measured from past seasons), and never goes "
+                   "above 99% or below 1%: injuries and streamers can still flip a category.")
 
         def why(cats_change):
             up = cats_change[cats_change > 0.02].sort_values(ascending=False)

@@ -61,4 +61,10 @@ assert abs(p - 0.5) < 1e-9 and (cat_odds.p_win - 0.5).abs().max() < 1e-9, p
 ft_guy = [[2, 1, 1, 0, 0, 0, 0, 1, 2, 0.95, 1]] * 3  # 95% FT on 1 attempt a game, 3 games
 better, _ = model.week_odds({}, gm + ft_guy, {}, gm, cats9)
 assert better.loc["FT%", "p_win"] < 0.56, better.loc["FT%", "p_win"]
+# a huge midweek lead is never called 100%; one player's 10 games share his projection error (more spread than 10 players)
+up, p = model.week_odds({"PTS": 900, "3PM": 120}, gm, {}, gm, cats9)
+assert up.p_win.max() <= 0.99 and p <= 0.99, (up.p_win.max(), p)
+one = model.week_odds({}, gm[:10], {"PTS": 150}, [], ["PTS"], ids=[1] * 10)[0].p_win.iloc[0]
+ten = model.week_odds({}, gm[:10], {"PTS": 150}, [], ["PTS"], ids=list(range(10)))[0].p_win.iloc[0]
+assert one < ten, (one, ten)
 print("ok")

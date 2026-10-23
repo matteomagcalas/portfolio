@@ -396,16 +396,27 @@ VAR_RATIO = {"PTS": 3.0, "REB": 1.35, "AST": 1.25, "STL": 1.07, "BLK": 1.1, "3PM
 # only in proportion to his ATTEMPTS: a 90% free-throw shooter with 1 attempt a game barely moves it.
 SHOT_VAR = {"FG%": 0.91, "FT%": 1.0}
 PCT = {"FG%": ("FGM", "FGA"), "FT%": ("FTM", "FTA")}
+# Projection error on top of game noise: a player's week total misses his projection by this share (FG%/FT%: this many
+# percentage points), the same miss in all his games. Measured on next-7-day totals of 20+ MPG players at every 8-day
+# checkpoint, 2023-24..2025-26 (early season and later came out alike).
+PROJ_CV = {"PTS": 0.113, "REB": 0.096, "AST": 0.143, "STL": 0.152, "BLK": 0.199, "3PM": 0.164, "TO": 0.159,
+           "FG%": 0.021, "FT%": 0.037}
+# No category is ever called: injuries, streamers your opponent adds and lineup news can still flip it.
+P_CAP = 0.01  # ponytail: a flat floor/cap, replace with a calibration fit once a few weeks of real results are in
 
 
-def week_odds(banked, games, banked_opp, games_opp, cats):
+def week_odds(banked, games, banked_opp, games_opp, cats, ids=None, ids_opp=None):
     """Chance to win each category this week and the matchup (most categories). banked: dict of totals so far
     (COUNT stats); games: array (games x COUNT) of per-game projections for each remaining game he'll START.
-    Each game is played with P_PLAY. Normal approximation per category; categories treated as independent."""
+    Each game is played with P_PLAY. ids / ids_opp: the player behind each game row (projection error is shared by
+    a player's games); None = each row its own player. Normal approximation per category; categories independent."""
     from math import erf, sqrt
 
-    def side(b, g):
+    def side(b, g, who):
         g = np.asarray(g, dtype=float).reshape(-1, len(COUNT))
+        who = np.arange(len(g)) if who is None else pd.factorize(pd.Series(list(who), dtype=object))[0]
+        per = np.zeros((who.max() + 1 if len(g) else 0, len(COUNT)))
+        np.add.at(per, who, P_PLAY * g)  # each player's expected remaining totals
         mu = {c: b.get(c, 0) + P_PLAY * g[:, k].sum() for k, c in enumerate(COUNT)}
         var = {c: (P_PLAY * VAR_RATIO.get(c, 1) * g[:, k] + P_PLAY * (1 - P_PLAY) * g[:, k] ** 2).sum()
                for k, c in enumerate(COUNT)}
@@ -413,16 +424,20 @@ def week_odds(banked, games, banked_opp, games_opp, cats):
             gm, ga = g[:, COUNT.index(m)], g[:, COUNT.index(a)]
             p_g = np.divide(gm, ga, out=np.zeros_like(gm), where=ga > 0)
             mu[pc] = mu[m] / mu[a] if mu[a] > 0 else 0.0
-            var[pc] = SHOT_VAR[pc] * P_PLAY * (ga * p_g * (1 - p_g)).sum() / mu[a] ** 2 if mu[a] > 0 else 0.0
+            var[pc] = ((SHOT_VAR[pc] * P_PLAY * (ga * p_g * (1 - p_g)).sum()
+                        + PROJ_CV[pc] ** 2 * (per[:, COUNT.index(a)] ** 2).sum()) / mu[a] ** 2 if mu[a] > 0 else 0.0)
+        for k, c in enumerate(COUNT):
+            if c in PROJ_CV:
+                var[c] += PROJ_CV[c] ** 2 * (per[:, k] ** 2).sum()
         return mu, var
 
-    (m1, v1), (m2, v2) = side(banked, games), side(banked_opp, games_opp)
+    (m1, v1), (m2, v2) = side(banked, games, ids), side(banked_opp, games_opp, ids_opp)
     rows = []
     for c in cats:
         diff = (m2[c] - m1[c]) if c == "TO" else (m1[c] - m2[c])  # fewer turnovers wins
         sd = sqrt(v1[c] + v2[c])
         p = (0.5 + 0.5 * erf(diff / (sd * sqrt(2)))) if sd > 0 else (1.0 if diff > 0 else 0.0 if diff < 0 else 0.5)
-        rows.append({"cat": c, "me": m1[c], "opp": m2[c], "p_win": p})
+        rows.append({"cat": c, "me": m1[c], "opp": m2[c], "p_win": min(max(p, P_CAP), 1 - P_CAP)})
     out = pd.DataFrame(rows).set_index("cat")
     dist = np.array([1.0])  # number of categories won: Poisson-binomial
     for p in out.p_win:
