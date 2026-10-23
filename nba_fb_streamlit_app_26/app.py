@@ -901,6 +901,12 @@ with tab_waiver:
                    "Upgrade = value gained by swapping that player out (green = better than him, red = worse). "
                    "Category columns show the change per game.")
         fa = v[~v.Mine & ~v.Taken].copy()
+        # ruled out (today or longer, incl. season) = a roster spot that can't play: not a pickup. Day-to-day stays.
+        out = fa.index.isin(d["injuries"].id[d["injuries"].status == "Out"])
+        if out.any():
+            st.caption(f"Hiding {out.sum()} injured free agent(s) ruled out right now (e.g. "
+                       f"{', '.join(fa[out].sort_values('value', ascending=False).name.head(3))}).")
+        fa = fa[~out]
         fa["Upgrade"] = (fa.value - worst.value).round(2)
         for c in cats:
             fa[f"Δ{c}"] = fa[f"z_{c}"] - worst[f"z_{c}"]
