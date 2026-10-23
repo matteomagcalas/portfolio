@@ -29,7 +29,14 @@ ESPN_IMG = "https://a.espncdn.com/combiner/i?img="  # resizes ESPN headshots/log
 @st.cache_data(ttl=900, show_spinner="Pulling latest ESPN data (about a minute the first time)...")
 def data(code):  # code: espn.py/model.py version, so a push never serves data loaded by older code
     espn.refresh()
-    return espn.load()
+    d = espn.load()
+    try:  # tonight's starters (NBA.com); re-read with this cache every 15 min, as teams confirm
+        d["tonight"] = espn.nba_lineups(pd.Timestamp.now(tz="America/New_York"))
+    except Exception:
+        d["tonight"] = pd.DataFrame(columns=["key", "team", "starter", "status"])
+    # cache key for everything built on this data: changes when ESPN data is re-pulled or a lineup changes
+    d["key"] = (d["updated"], pd.util.hash_pandas_object(d["tonight"], index=False).sum())
+    return d
 
 
 def this_week():
@@ -91,6 +98,12 @@ def board(cats, pool_size, updated, code):  # code: model/espn version, so a pus
     out_now = set(d["injuries"].id[d["injuries"].status == "Out"])
     dc = d["depth"][~d["depth"].id.isin(out_now)].sort_values("slot")
     starter_now = pd.Series(1.0, index=dc.groupby(["team_id", "pos"]).id.first().unique())
+    # teams playing tonight: NBA.com's starting five (expected or confirmed) replaces the depth chart
+    key_id = pl.assign(key=pl.name.map(espn._norm)).drop_duplicates("key").set_index("key").id
+    tn = d["tonight"].assign(id=d["tonight"].key.map(key_id)).dropna(subset=["id"]).astype({"id": int})
+    tn_teams = set(pl.set_index("id").team_id.reindex(tn.id))
+    starter_now = starter_now[~starter_now.index.map(pl.set_index("id").team_id).isin(tn_teams)]
+    starter_now = pd.concat([starter_now, pd.Series(1.0, index=tn.id[tn.starter].unique())])
     pre_start = pd.Series(1.0, index=d["preseason_depth"].query("slot == 0").id.unique())
     pre_start = pre_start.reindex(pre.id).fillna(0)  # preseason role: starter or bench, worth 4 games
     # an injured starter keeps his spot here: he returns to it (past seasons: 'starting now' = his first game back)
@@ -107,6 +120,9 @@ def board(cats, pool_size, updated, code):  # code: model/espn version, so a pus
     back = inj.return_date.map(lambda r: f"{pd.Timestamp(r):%m/%d}" if isinstance(r, str) else "")
     v["Injury"] = v.id.map((status + " " + back.where(~inj.season_out.astype(bool), "season")).str.strip()).fillna("")
     v["note"] = v.id.map(inj.note).fillna("")
+    tn = tn.drop_duplicates("id").set_index("id")
+    v["Tonight"] = v.id.map(tn.starter.map({True: "Starting", False: "Bench"}) + tn.status.map({"Expected": " (exp.)"}).fillna(""))
+    v["Tonight"] = v.Tonight.fillna(v.team_id.isin(tn_teams).map({True: "Bench", False: ""}))  # not in an expected five
     out = v.GP == 0  # out for the season: no stats to project
     v.loc[out, ["MPG", "PTS", "REB", "AST", "STL", "BLK", "3PM", "FG%", "FT%", "TO", "FGM", "FGA", "FTM", "FTA",
                *[f"z_{c}" for c in cats]]] = None
@@ -338,7 +354,7 @@ def stream_planner(v, team, il, cats, teams, roster, max_adds, moves, my_name):
                            help="Rest-of-season value lost by a swap (dropped player's value minus the add's). "
                                 "0 = only swaps that don't cost you anything long term")
     left_adds = max(cap - used, 0)
-    _, pgv, gl = week_plan_inputs(tuple(cats), int(teams * roster), d["updated"], CODE)
+    _, pgv, gl = week_plan_inputs(tuple(cats), int(teams * roster), d["key"], CODE)
     pgv, pos = pgv.to_dict(), v.pos.to_dict()
     games_left = gl.groupby("id").size()
     roster_ids = set(team.index) - il
@@ -423,7 +439,7 @@ if not cats:
     st.warning("Pick at least one category.")
     st.stop()
 
-v = board(tuple(cats), int(teams * roster), d["updated"], CODE)
+v = board(tuple(cats), int(teams * roster), d["key"], CODE)
 
 # Draft state lives in the URL, so a page refresh or bookmark keeps your picks.
 qp = st.query_params
@@ -500,6 +516,9 @@ FMT.update({"FG%": st.column_config.NumberColumn(format="%.3f"), "FT%": st.colum
             "adp": st.column_config.NumberColumn("ADP", format="%.1f", help="Yahoo average draft position. "
                                                  "Blank = not being drafted in Yahoo leagues"),
             "age": st.column_config.NumberColumn("Age", format="%.0f"),
+            "Tonight": st.column_config.TextColumn("Tonight", help="NBA.com starting lineups for tonight (exp. = expected, "
+                                                   "not yet confirmed by the team). A bench player starting tonight gets "
+                                                   "the starter's minutes bump in his value; blank = no game tonight."),
             "value": st.column_config.NumberColumn("Value", format="%.2f",
                                                    help="Rest-of-season value: z-scores x projected games left. Never negative: about 0.7 = "
                                                         "replacement level, near 0 = won't play"),
@@ -551,7 +570,7 @@ weekly = st.segmented_control(
          "injuries are reported and players move into or out of the starting lineup.") == "This week (totals)"
 vv = v
 if weekly:
-    wk = week_board(tuple(cats), int(teams * roster), d["updated"], CODE)
+    wk = week_board(tuple(cats), int(teams * roster), d["key"], CODE)
     vv = v.copy()
     wcols = [*model.COUNT, "FG%", "FT%", "MPG", "GP", "g_played", "g_left", *[f"z_{c}" for c in cats], "value", "Rank"]
     vv[wcols] = wk[wcols].reindex(vv.index)
@@ -596,11 +615,11 @@ with tab_draft:
                f"{len(mine)} mine, {len(taken)} taken by others. Category colors: green = helps you vs. the "
                f"draftable pool, red = hurts (FG%/FT% weighted by attempts, high TO is red).")
     cols = (["Star", "Mine", "Taken", "Rank", "name", "team", "pos", "value", "g_played", "g_left", "MPG",
-             *[c for c in STAT_COLS if c not in ("GP", "MPG")], "Injury"] if weekly else
+             *[c for c in STAT_COLS if c not in ("GP", "MPG")], "Injury", "Tonight"] if weekly else
             ["Star", "Mine", "Taken", "Rank", "RankChg", "PreRank", "PosRank", "name", "team", "pos", "age", "value",
-             "gp_so_far", *STAT_COLS, "Injury"] if in_season else
+             "gp_so_far", *STAT_COLS, "Injury", "Tonight"] if in_season else
             ["Star", "Mine", "Taken", "adp", "Rank", "ADPval", "PosRank", "name", "team", "pos", "age", "value",
-             *STAT_COLS, "Injury"])
+             *STAT_COLS, "Injury", "Tonight"])
     # The key follows the rows shown (not the picks), so a tick keeps the same editor and your scroll spot,
     # and edits never replay onto different rows after a filter change.
     st.session_state.star_draft_ids = list(view.index[:400])
@@ -654,13 +673,13 @@ with tab_team:
         for col, c in zip(st.columns(len(cats)), cats):
             col.metric(c, f"{strength[f'z_{c}']:+.1f}")
         tcols = (["Rank", "Photo", "name", "Logo", "team", "pos", "value", "g_played", "g_left", "MPG",
-                  *[c for c in STAT_COLS if c not in ("GP", "MPG")], "Injury"] if weekly else
-                 ["Rank", "PosRank", "Photo", "name", "Logo", "team", "pos", "value", *STAT_COLS, "Injury"])
+                  *[c for c in STAT_COLS if c not in ("GP", "MPG")], "Injury", "Tonight"] if weekly else
+                 ["Rank", "PosRank", "Photo", "name", "Logo", "team", "pos", "value", *STAT_COLS, "Injury", "Tonight"])
         st.dataframe(styled(team.sort_values("Rank")[tcols], vv, cats),
                      hide_index=True, column_config=FMT)
         if weekly:
             # box scores so far this week + the remaining games your daily lineups would start (IL slots don't score)
-            per, pgv, gl = week_plan_inputs(tuple(cats), int(teams * roster), d["updated"], CODE)
+            per, pgv, gl = week_plan_inputs(tuple(cats), int(teams * roster), d["key"], CODE)
             active = set(team.index) - il
             starts = pd.DataFrame(daily_starts(active, gl, pgv.to_dict(), v.pos.to_dict()), columns=["id", "date", "slot"])
             g = d["games"]
@@ -677,7 +696,7 @@ with tab_team:
         team = v[v.Mine]
 
         team = v[v.Mine]
-        per, pgv, gl = week_plan_inputs(tuple(cats), int(teams * roster), d["updated"], CODE)
+        per, pgv, gl = week_plan_inputs(tuple(cats), int(teams * roster), d["key"], CODE)
         ws, we = this_week()
         starts = pd.DataFrame(daily_starts(set(team.index) - il, gl, pgv.to_dict(), v.pos.to_dict()),
                               columns=["id", "date", "slot"])
@@ -824,7 +843,7 @@ with tab_match:
         wk_days = list(pd.date_range(today, this_week()[1]))
         base, p0, options, starts, opp_starts, p_rec = matchup_plan(
             active(my_team), active(int(me_row.opp_id)), tuple(v.index[~v.Mine & ~v.Taken]), bank(me_row), bank(opp_row),
-            tuple(cats), today, d["updated"], CODE, int(teams * roster), give, v.value,
+            tuple(cats), today, d["key"], CODE, int(teams * roster), give, v.value,
             # you: what you've set in Yahoo; opponent: their best lineup every day (assume the worst for you)
             yahoo_active(my_team, wk_days), ())
         m1, m2, m3 = st.columns(3)
@@ -920,7 +939,7 @@ with tab_waiver:
             fa = fa[fa.team.isin(team_filter)]
         num = ["Upgrade", "value", "opp_min", *[f"Δ{c}" for c in cats]]
         st.dataframe(fa[["Photo", "name", "Logo", "team", "pos", "Upgrade", "value", *(["RankChg"] if in_season else []), "opp_min",
-                         *[f"Δ{c}" for c in cats], "Injury"]].head(show).style
+                         *[f"Δ{c}" for c in cats], "Injury", "Tonight"]].head(show).style
                      .apply(lambda col: col.map(injury_badge), subset=["Injury"])
                      .apply(lambda col: (col / 3).map(shade), subset=["Upgrade"])
                      .format("{:+.2f}", subset=[c for c in num if c != "value"]).format("{:.2f}", subset=["value"])
@@ -928,7 +947,7 @@ with tab_waiver:
                      hide_index=True, column_config=FMT, height=600)
         # works from opening night: role = depth chart vs. preseason role until games pile up
         st.subheader("Minutes opening up: next 2 weeks")
-        st.caption("Free agents moving into the starting lineup (ESPN depth chart, injured players skipped) who mostly came "
+        st.caption("Free agents moving into the starting lineup (NBA.com lineups for teams playing tonight, else the ESPN depth chart; injured players skipped) who mostly came "
                    "off the bench lately. Backtest: about 4.5 more minutes over the next 2 weeks than their recent games "
                    "suggest (about 2.4 of it lasts the rest of the season if he keeps the job). Valued over their games in the next 14 days; often short-term streamers.")
         today = pd.Timestamp.now(tz="America/New_York").tz_localize(None).normalize()
@@ -947,7 +966,7 @@ with tab_waiver:
             nxt = allv.loc[nxt.id]
             nxt["pg_rank"] = nxt.value_pg.map(lambda x: int((allv.value_pg > x).sum()) + 1)
             nxt = nxt.sort_values("value", ascending=False).head(50)
-            st.dataframe(nxt[["name", "team", "pos", "opp_min", "MPG", "wk2", "pg_rank", *[c for c in STAT_COLS if c not in ("GP", "MPG")], "Injury"]],
+            st.dataframe(nxt[["name", "team", "pos", "opp_min", "MPG", "wk2", "pg_rank", *[c for c in STAT_COLS if c not in ("GP", "MPG")], "Injury", "Tonight"]],
                          hide_index=True, column_config={**FMT, "wk2": st.column_config.NumberColumn("Games (2 wk)"),
                                                          "MPG": st.column_config.NumberColumn("MPG (boosted)", format="%.2f"),
                                                          "opp_min": st.column_config.NumberColumn("+Min (role)", format="%+.2f"),

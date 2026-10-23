@@ -200,6 +200,21 @@ def stale(mtime, now=None):
     return now - pd.Timestamp(mtime, unit="s", tz="UTC") > pd.Timedelta(hours=MAX_AGE_HOURS) or         pd.Timestamp(mtime, unit="s", tz="UTC") < cutoff
 
 
+def nba_lineups(date):
+    """Starting lineups for `date` from NBA.com (the feed behind nba.com/players/todays-lineups): rows key (normalized
+    name), team (NBA abbreviation), starter, status (Expected until the team confirms, then Confirmed). Expected
+    lineups list only the five starters. Empty until NBA.com posts that day (usually the morning of)."""
+    try:
+        r = _get(f"https://stats.nba.com/js/data/leaders/00_daily_lineups_{date:%Y%m%d}.json",
+                 headers={"User-Agent": "Mozilla/5.0", "Referer": "https://www.nba.com/"})
+    except ValueError:  # not posted yet: the URL answers with a non-JSON page
+        r = {}
+    rows = [{"key": _norm(p["playerName"]), "team": g[side]["teamAbbreviation"],
+             "starter": bool(p.get("position")) and p.get("rosterStatus") == "Active", "status": p.get("lineupStatus", "")}
+            for g in r.get("games", []) for side in ("homeTeam", "awayTeam") for p in g[side].get("players", [])]
+    return pd.DataFrame(rows, columns=["key", "team", "starter", "status"])
+
+
 # ESPN team abbreviations that Yahoo writes differently (matchups are shown the way Yahoo shows them)
 YAHOO_ABBR = {"GS": "GSW", "NO": "NOP", "NY": "NYK", "SA": "SAS", "UTAH": "UTA", "WSH": "WAS"}
 
