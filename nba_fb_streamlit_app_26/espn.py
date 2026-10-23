@@ -218,7 +218,6 @@ def refresh(force=False):
 
     current = _players(SEASON)
     pd.DataFrame(_stat_rows(current, SEASON)).to_csv(DATA / "current.csv", index=False)  # last season + this season's ESPN proj
-    _game_rows(current, SEASON).to_csv(DATA / f"games_{SEASON}.csv", index=False)  # this season's box scores so far
 
     teams = {int(t["team"]["id"]): t["team"]["abbreviation"]
              for t in _get(f"{SITE}/teams")["sports"][0]["leagues"][0]["teams"]}
@@ -239,6 +238,12 @@ def refresh(force=False):
             games.append({"team_id": tid, "date": f"{et:%Y-%m-%d}",  # matchup as Yahoo shows it: DAL home, @UTA away
                           "opp": opp if us is None or us["homeAway"] == "home" else f"@{opp}"})
     pd.DataFrame(games).to_csv(DATA / "schedule.csv", index=False)
+    # this season's box scores so far, finished days only: a pull during a live game would bank a partial box score
+    # as a full game (and drop that game from the week's remaining ones). A fantasy day ends at 3 am ET, as in stale().
+    opener = pd.to_datetime(pd.DataFrame(games).date).min()
+    today = (pd.Timestamp.now(tz="America/New_York") - pd.Timedelta(hours=3)).tz_localize(None).normalize()
+    g = _game_rows(current, SEASON)
+    g[g.day < (today - opener).days + 1].to_csv(DATA / f"games_{SEASON}.csv", index=False)
     pd.DataFrame(depth, columns=["id", "team_id", "pos", "slot"]).to_csv(DATA / "depth.csv", index=False)
 
     players = pd.DataFrame([{
