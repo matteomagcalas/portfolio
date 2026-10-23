@@ -872,9 +872,8 @@ with tab_match:
                 st.dataframe(pd.DataFrame({
                     "Day": sw.date.map(lambda x: f"{pd.Timestamp(x):%a %m/%d}"), "Start": sw["in"].map(v.name),
                     "Instead of": sw["out"].map(v.name), "Win chance": sw.p, "Change": sw.gain,
-                    "Categories": sw.cats.map(why)}).head(10), hide_index=True,
-                    column_config={"Win chance": st.column_config.NumberColumn(format="percent"),
-                                   "Change": st.column_config.NumberColumn(format="%+.1%")})
+                    "Categories": sw.cats.map(why)}).head(10).style.format({"Win chance": "{:.2%}", "Change": "{:+.2%}"}),
+                    hide_index=True)
             st.markdown(f"**Who to add** ({adds_left} add(s) left this week)")
             ad = options[(options.kind == "add") & (options.gain > 0.005)].sort_values("gain", ascending=False)
             if not adds_left:
@@ -885,11 +884,9 @@ with tab_match:
                 st.dataframe(pd.DataFrame({
                     "Add": ad["in"].map(v.name), "Team": ad["in"].map(v.team), "Drop": ad["out"].map(v.name),
                     "Win chance": ad.p, "Change": ad.gain, "Categories": ad.cats.map(why),
-                    "Season value change": ad["in"].map(v.value).values - ad["out"].map(v.value).values}).head(10),
-                    hide_index=True,
-                    column_config={"Win chance": st.column_config.NumberColumn(format="percent"),
-                                   "Change": st.column_config.NumberColumn(format="%+.1%"),
-                                   "Season value change": st.column_config.NumberColumn(format="%+.2f")})
+                    "Season value change": ad["in"].map(v.value).values - ad["out"].map(v.value).values}).head(10)
+                    .style.format({"Win chance": "{:.2%}", "Change": "{:+.2%}", "Season value change": "{:+.2f}"}),
+                    hide_index=True)
             st.caption("Changes are in your chance to win the whole matchup; Categories lists the biggest moves in each "
                        "category's win chance. A low-volume shooter barely moves FG%/FT% and costs counting stats, so "
                        "he won't show up here.")
