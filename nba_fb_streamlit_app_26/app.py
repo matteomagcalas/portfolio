@@ -950,5 +950,15 @@ with tab_waiver:
                                                          "pg_rank": st.column_config.NumberColumn("Per-game rank", help="Where his per-game "
                                                              "line while starting would rank among all players")})
     if moves is not None and len(moves):
-        with st.expander(f"Recent league moves ({len(moves)})"):
-            st.dataframe(moves.assign(time=moves.time.dt.strftime("%b %d %I:%M %p")), hide_index=True)
+        mv = moves.assign(Time=moves.time.dt.strftime("%b %d %I:%M %p"))
+        fa = mv[mv.kind != "trade"]  # free agent / waiver claims: one row per transaction (add, drop or both)
+        fa = fa.groupby("tx", sort=False).apply(lambda t: pd.Series({
+            "Time": t.Time.iloc[0], "Added": ", ".join(t["name"][t.type == "add"]), "Dropped": ", ".join(t["name"][t.type == "drop"]),
+            "Team": next(iter(t.to[t.type == "add"]), None) or next(iter(t["from"][t.type == "drop"]), "")}), include_groups=False)
+        trades = mv[mv.kind == "trade"]
+        with st.expander(f"Recent league moves ({len(fa) + trades.tx.nunique()})"):
+            st.dataframe(fa, hide_index=True)
+            if len(trades):
+                st.markdown("**Trades**")
+                st.dataframe(trades[["Time", "name", "from", "to"]].rename(columns={"name": "Player", "from": "From", "to": "To"}),
+                             hide_index=True)

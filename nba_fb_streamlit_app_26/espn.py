@@ -112,7 +112,8 @@ YAHOO_PAIR = {"9004003": ("FGM", "FGA"), "9007006": ("FTM", "FTA")}  # shown as 
 
 def yahoo_league(league_id):
     """Live rosters and recent moves of a public Yahoo league (no login needed).
-    Returns (rosters: team_id, team, key, name, slot (today's Yahoo slot: PG..Util, BN, IL); moves: time, type, name, from, to;
+    Returns (rosters: team_id, team, key, name, slot (today's Yahoo slot: PG..Util, BN, IL); moves: tx, kind, time, type,
+    name, from, to (one row per player moved);
     max_adds: the league's adds per week, None if unlimited; scoreboard: this week's matchups, one row per team with
     opp_id and its category totals so far, counted by Yahoo from active-lineup games only); key = normalized name."""
     url = f"https://pub-api-rw.fantasysports.yahoo.com/fantasy/v2/league/nba.l.{league_id}/{{}}?format=json"
@@ -137,7 +138,8 @@ def yahoo_league(league_id):
             p = ps[str(j)]["player"]
             move = p[1]["transaction_data"]
             move = move[0] if isinstance(move, list) else move
-            moves.append({"time": pd.Timestamp(int(t[0]["timestamp"]), unit="s", tz="UTC").tz_convert("America/New_York"),
+            moves.append({"tx": t[0]["transaction_id"], "kind": t[0]["type"],  # kind: add, drop, add/drop, trade
+                          "time": pd.Timestamp(int(t[0]["timestamp"]), unit="s", tz="UTC").tz_convert("America/New_York"),
                           "type": move["type"], "name": _flat(p[0])["name"]["full"],
                           "from": move.get("source_team_name", move.get("source_type", "")),
                           "to": move.get("destination_team_name", move.get("destination_type", ""))})
@@ -160,7 +162,7 @@ def yahoo_league(league_id):
             board.append(row)
     settings = _get(url.format("settings"), headers=h)["fantasy_content"]["league"][1]["settings"][0]
     max_adds = int(settings["max_weekly_adds"]) if str(settings.get("max_weekly_adds", "")).isdigit() else None
-    return (pd.DataFrame(rosters), pd.DataFrame(moves, columns=["time", "type", "name", "from", "to"]), max_adds,
+    return (pd.DataFrame(rosters), pd.DataFrame(moves, columns=["tx", "kind", "time", "type", "name", "from", "to"]), max_adds,
             pd.DataFrame(board))
 
 
