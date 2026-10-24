@@ -39,8 +39,14 @@ def data(code):  # code: espn.py/model.py version, so a push never serves data l
     return d
 
 
+WEEK = None  # the league's current matchup week (start, end) from Yahoo's scoreboard, set once the league syncs
+
+
 def this_week():
-    """Fantasy week Monday-Sunday, US Eastern."""
+    """Fantasy week: the league's current Yahoo matchup week when synced (week 1 starts on opening night, a Tuesday),
+    else Monday-Sunday. US Eastern."""
+    if WEEK:
+        return WEEK
     today = pd.Timestamp.now(tz="America/New_York").tz_localize(None).normalize()
     start = today - pd.Timedelta(days=today.weekday())
     return start, start + pd.Timedelta(days=6)
@@ -355,7 +361,7 @@ def stream_planner(v, team, il, cats, teams, roster, max_adds, moves, my_name):
                            help="Rest-of-season value lost by a swap (dropped player's value minus the add's). "
                                 "0 = only swaps that don't cost you anything long term")
     left_adds = max(cap - used, 0)
-    _, pgv, gl = week_plan_inputs(tuple(cats), int(teams * roster), d["key"], CODE)
+    _, pgv, gl = week_plan_inputs(tuple(cats), int(teams * roster), (d["key"], WEEK), CODE)
     pgv, pos = pgv.to_dict(), v.pos.to_dict()
     games_left = gl.groupby("id").size()
     roster_ids = set(team.index) - il
@@ -411,6 +417,8 @@ with st.sidebar:
     if league_id:
         try:
             rosters, moves, max_adds, scoreboard = league(league_id, CODE)
+            if scoreboard is not None and len(scoreboard):
+                WEEK = (pd.Timestamp(scoreboard.week_start.iloc[0]), pd.Timestamp(scoreboard.week_end.iloc[0]))
         except Exception as e:
             st.error(f"Couldn't read Yahoo league {league_id} (is it public?): {e}")
     if rosters is not None and len(rosters):
@@ -440,7 +448,7 @@ if not cats:
     st.warning("Pick at least one category.")
     st.stop()
 
-v = board(tuple(cats), int(teams * roster), d["key"], CODE)
+v = board(tuple(cats), int(teams * roster), (d["key"], WEEK), CODE)
 
 # Draft state lives in the URL, so a page refresh or bookmark keeps your picks.
 qp = st.query_params
@@ -563,7 +571,7 @@ else:
 m3.metric("Your picks", len(mine), f"{len(taken)} taken by others", delta_color="off", border=True)
 m4.metric("ESPN data", f"{ago:.0f}h ago" if ago >= 1 else "just now", "refreshes about every 6h",
           delta_color="off", border=True)
-# Season = rest-of-season per-game projection. This week = category totals for Mon-Sun: what's been played plus
+# Season = rest-of-season per-game projection. This week = category totals for the league week: what's been played plus
 # what's projected for the games left (injury report, role changes), which is what wins 7 of 9 H2H categories.
 weekly = st.segmented_control(
     "Stats shown", ["Season (per game)", "This week (totals)"], default="Season (per game)", key="stat_mode",
@@ -571,13 +579,13 @@ weekly = st.segmented_control(
          "injuries are reported and players move into or out of the starting lineup.") == "This week (totals)"
 vv = v
 if weekly:
-    wk = week_board(tuple(cats), int(teams * roster), d["key"], CODE)
+    wk = week_board(tuple(cats), int(teams * roster), (d["key"], WEEK), CODE)
     vv = v.copy()
     wcols = [*model.COUNT, "FG%", "FT%", "MPG", "GP", "g_played", "g_left", *[f"z_{c}" for c in cats], "value", "Rank"]
     vv[wcols] = wk[wcols].reindex(vv.index)
     ws, we = this_week()
     st.caption(f"Week of {ws:%b %d} - {we:%b %d}: totals = played so far + expected remaining games "
-               f"(each healthy game counts {model.P_PLAY:.0%}, the share rotation players actually play). Weeks run Monday-Sunday.")
+               f"(each healthy game counts {model.P_PLAY:.0%}, the share rotation players actually play). Weeks follow your Yahoo league (Monday-Sunday if not connected).")
 
 tab_draft, tab_team, tab_match, tab_star, tab_waiver = st.tabs([":material/sports_basketball: Available Players",
                                                      ":material/groups: My team", ":material/scoreboard: Matchup",
@@ -680,11 +688,11 @@ with tab_team:
                      hide_index=True, column_config=FMT)
         if weekly:
             # box scores so far this week + the remaining games your daily lineups would start (IL slots don't score)
-            per, pgv, gl = week_plan_inputs(tuple(cats), int(teams * roster), d["key"], CODE)
+            per, pgv, gl = week_plan_inputs(tuple(cats), int(teams * roster), (d["key"], WEEK), CODE)
             active = set(team.index) - il
             starts = pd.DataFrame(daily_starts(active, gl, pgv.to_dict(), v.pos.to_dict()), columns=["id", "date", "slot"])
             g = d["games"]
-            week_day1 = (this_week()[0] - pd.to_datetime(d["schedule"].date).min()).days + 1  # Monday's season day
+            week_day1 = (this_week()[0] - pd.to_datetime(d["schedule"].date).min()).days + 1  # the week's first season day
             played = g[g.id.isin(active) & (g.day >= week_day1)]
             tot = played[model.COUNT].sum() + per.loc[starts.id, model.COUNT].sum() * model.P_PLAY
             row = {c: tot[c] for c in ["PTS", "REB", "AST", "STL", "BLK", "3PM", "TO"]}
@@ -697,13 +705,13 @@ with tab_team:
         team = v[v.Mine]
 
         team = v[v.Mine]
-        per, pgv, gl = week_plan_inputs(tuple(cats), int(teams * roster), d["key"], CODE)
+        per, pgv, gl = week_plan_inputs(tuple(cats), int(teams * roster), (d["key"], WEEK), CODE)
         ws, we = this_week()
         starts = pd.DataFrame(daily_starts(set(team.index) - il, gl, pgv.to_dict(), v.pos.to_dict()),
                               columns=["id", "date", "slot"])
         st.subheader("Daily lineup")
         today = pd.Timestamp.now(tz="America/New_York").tz_localize(None).normalize()
-        week_days = {f"{ws + pd.Timedelta(days=k):%a %m/%d}": ws + pd.Timedelta(days=k) for k in range(7)}
+        week_days = {f"{ws + pd.Timedelta(days=k):%a %m/%d}": ws + pd.Timedelta(days=k) for k in range((we - ws).days + 1)}
         pick = st.segmented_control("Day", list(week_days), key="lineup_day",
                                     default=next((k for k, dt in week_days.items() if dt == today), list(week_days)[0]))
         day = week_days.get(pick or "", today)
@@ -844,7 +852,7 @@ with tab_match:
         wk_days = list(pd.date_range(today, this_week()[1]))
         base, p0, options, starts, opp_starts, p_rec = matchup_plan(
             active(my_team), active(int(me_row.opp_id)), tuple(v.index[~v.Mine & ~v.Taken]), bank(me_row), bank(opp_row),
-            tuple(cats), today, d["key"], CODE, int(teams * roster), give, v.value,
+            tuple(cats), today, (d["key"], WEEK), CODE, int(teams * roster), give, v.value,
             # you: what you've set in Yahoo; opponent: their best lineup every day (assume the worst for you)
             yahoo_active(my_team, wk_days), ())
         m1, m2, m3 = st.columns(3)
