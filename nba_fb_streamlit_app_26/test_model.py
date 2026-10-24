@@ -67,4 +67,9 @@ assert up.p_win.max() <= 0.99 and p <= 0.99, (up.p_win.max(), p)
 one = model.week_odds({}, gm[:10], {"PTS": 150}, [], ["PTS"], ids=[1] * 10)[0].p_win.iloc[0]
 ten = model.week_odds({}, gm[:10], {"PTS": 150}, [], ["PTS"], ids=list(range(10)))[0].p_win.iloc[0]
 assert one < ten, (one, ten)
+# same lead is less certain early in the week (FT% most), unchanged with 2 days left
+lead = {"FTM": 30, "FTA": 36}
+early = model.week_odds(lead, gm, {"FTM": 24, "FTA": 36}, gm, cats9, days_left=6)[0].p_win["FT%"]
+late = model.week_odds(lead, gm, {"FTM": 24, "FTA": 36}, gm, cats9, days_left=2)[0].p_win["FT%"]
+assert 0.5 < early < late, (early, late)
 print("ok")

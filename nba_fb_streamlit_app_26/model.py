@@ -402,14 +402,21 @@ PCT = {"FG%": ("FGM", "FGA"), "FT%": ("FTM", "FTA")}
 PROJ_CV = {"PTS": 0.113, "REB": 0.096, "AST": 0.143, "STL": 0.152, "BLK": 0.199, "3PM": 0.164, "TO": 0.159,
            "FG%": 0.021, "FT%": 0.037}
 # No category is ever called: injuries, streamers your opponent adds and lineup news can still flip it.
+# Missed games come in runs (injury, rest): two games of the same player in a week are both missed or both played
+# with this correlation (20+ games of 24+ MPG players, 2023-24..2025-26; 0.52-0.60 for 2-5 games a week).
+RHO_MISS = 0.58
+# What's still left early in the week: spread grows by this share with 6 days to go, fading to none with 2 left
+# (fit on 8,100 replayed 10-on-10 matchups, 2023-24..2025-26; stable across halves). FT% swings most, FG% is on target.
+EARLY = {"PTS": 0.22, "REB": 0.26, "AST": 0.16, "STL": 0.0, "BLK": 0.16, "3PM": 0.08, "TO": 0.18, "FG%": 0.02, "FT%": 0.30}
 P_CAP = 0.01  # ponytail: a flat floor/cap, replace with a calibration fit once a few weeks of real results are in
 
 
-def week_odds(banked, games, banked_opp, games_opp, cats, ids=None, ids_opp=None):
+def week_odds(banked, games, banked_opp, games_opp, cats, ids=None, ids_opp=None, days_left=2):
     """Chance to win each category this week and the matchup (most categories). banked: dict of totals so far
     (COUNT stats); games: array (games x COUNT) of per-game projections for each remaining game he'll START.
     Each game is played with P_PLAY. ids / ids_opp: the player behind each game row (projection error is shared by
-    a player's games); None = each row its own player. Normal approximation per category; categories independent."""
+    a player's games); None = each row its own player. days_left: days left in the week, today included (EARLY).
+    Normal approximation per category; categories independent."""
     from math import erf, sqrt
 
     def side(b, g, who):
@@ -417,6 +424,12 @@ def week_odds(banked, games, banked_opp, games_opp, cats, ids=None, ids_opp=None
         who = np.arange(len(g)) if who is None else pd.factorize(pd.Series(list(who), dtype=object))[0]
         per = np.zeros((who.max() + 1 if len(g) else 0, len(COUNT)))
         np.add.at(per, who, P_PLAY * g)  # each player's expected remaining totals
+        miss = P_PLAY * (1 - P_PLAY)  # variance of playing a game
+
+        def runs(x):  # extra variance when a player's misses come together: covariance between his games
+            s_ = np.zeros(len(per))
+            np.add.at(s_, who, x)
+            return miss * RHO_MISS * ((s_ ** 2).sum() - (x ** 2).sum())
         mu = {c: b.get(c, 0) + P_PLAY * g[:, k].sum() for k, c in enumerate(COUNT)}
         var = {c: (P_PLAY * VAR_RATIO.get(c, 1) * g[:, k] + P_PLAY * (1 - P_PLAY) * g[:, k] ** 2).sum()
                for k, c in enumerate(COUNT)}
@@ -424,18 +437,19 @@ def week_odds(banked, games, banked_opp, games_opp, cats, ids=None, ids_opp=None
             gm, ga = g[:, COUNT.index(m)], g[:, COUNT.index(a)]
             p_g = np.divide(gm, ga, out=np.zeros_like(gm), where=ga > 0)
             mu[pc] = mu[m] / mu[a] if mu[a] > 0 else 0.0
-            var[pc] = ((SHOT_VAR[pc] * P_PLAY * (ga * p_g * (1 - p_g)).sum()
+            dev = gm - mu[pc] * ga  # a missed game moves the % by how far his shooting is from the team's
+            var[pc] = ((SHOT_VAR[pc] * P_PLAY * (ga * p_g * (1 - p_g)).sum() + miss * (dev ** 2).sum() + runs(dev)
                         + PROJ_CV[pc] ** 2 * (per[:, COUNT.index(a)] ** 2).sum()) / mu[a] ** 2 if mu[a] > 0 else 0.0)
         for k, c in enumerate(COUNT):
             if c in PROJ_CV:
-                var[c] += PROJ_CV[c] ** 2 * (per[:, k] ** 2).sum()
+                var[c] += PROJ_CV[c] ** 2 * (per[:, k] ** 2).sum() + runs(g[:, k])
         return mu, var
 
     (m1, v1), (m2, v2) = side(banked, games, ids), side(banked_opp, games_opp, ids_opp)
     rows = []
     for c in cats:
         diff = (m2[c] - m1[c]) if c == "TO" else (m1[c] - m2[c])  # fewer turnovers wins
-        sd = sqrt(v1[c] + v2[c])
+        sd = sqrt(v1[c] + v2[c]) * (1 + EARLY.get(c, 0) * min(max(days_left - 2, 0), 4) / 4)
         p = (0.5 + 0.5 * erf(diff / (sd * sqrt(2)))) if sd > 0 else (1.0 if diff > 0 else 0.0 if diff < 0 else 0.5)
         rows.append({"cat": c, "me": m1[c], "opp": m2[c], "p_win": min(max(p, P_CAP), 1 - P_CAP)})
     out = pd.DataFrame(rows).set_index("cat")

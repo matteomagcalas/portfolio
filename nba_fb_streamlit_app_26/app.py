@@ -302,7 +302,8 @@ def matchup_plan(my_ids, opp_ids, fa_ids, banked, banked_opp, cats, today, updat
     def odds(starts, opp_starts):
         return model.week_odds(banked, [vec.get(i, zero) for i, _, _ in starts],
                                banked_opp, [vec.get(i, zero) for i, _, _ in opp_starts], list(cats),
-                               [i for i, _, _ in starts], [i for i, _, _ in opp_starts])
+                               [i for i, _, _ in starts], [i for i, _, _ in opp_starts],
+                               (this_week()[1] - pd.Timestamp(today)).days + 1)
 
     def as_set(ids, lineup):  # Yahoo lineups where known, recommended for the other days
         known = {dt: set(a) for dt, a in lineup}
